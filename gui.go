@@ -16,6 +16,8 @@ type Message struct {
 	body    string
 }
 
+type Words []string
+
 var view_rooms_w int = 24
 var view_users_w int = 24
 var view_timeline_w int = 22
@@ -25,7 +27,8 @@ var window_w int = -1
 var window_h int = -1
 
 var readline_h int = 1
-var readline_max_h = 8
+
+//var readline_max_h = 8
 
 var my_nick = "dhole"
 
@@ -33,7 +36,38 @@ var msgs []Message
 
 var debug_buf *bytes.Buffer
 
-func init_msgs() {
+var ReadLineEditor gocui.Editor = gocui.EditorFunc(readLine)
+var ReadMultiLineEditor gocui.Editor = gocui.EditorFunc(readMultiLine)
+
+var readline_multiline bool
+var readline_buff []Words
+var readline_idx int
+
+func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
+	switch {
+	case ch != 0 && mod == 0:
+		v.EditWrite(ch)
+	case key == gocui.KeySpace:
+		v.EditWrite(' ')
+	case key == gocui.KeyBackspace || key == gocui.KeyBackspace2:
+		v.EditDelete(true)
+	case key == gocui.KeyEnter:
+		body := v.Buffer()
+		v.Clear()
+		v.SetOrigin(0, 0)
+		v.SetCursor(0, 0)
+		if len(body) != 0 {
+			sendMsg(body)
+		}
+	}
+}
+
+func readMultiLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
+	// TODO
+	readLine(v, key, ch, mod)
+}
+
+func initMsgs() {
 	msgs = make([]Message, 0)
 	msgs = append(msgs, Message{"m.text", 1234, "alice", "OLA K ASE"})
 	msgs = append(msgs, Message{"m.text", 1246, "bob", "OLA K DISE"})
@@ -41,10 +75,36 @@ func init_msgs() {
 	msgs = append(msgs, Message{"m.text", 1249, "bob", "Andaaa, poh no me digas      mas  hehe     toma tomate"})
 	msgs = append(msgs, Message{"m.text", 1258, "alice", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Proin eget diam egestas, sollicitudin sapien eu, gravida tortor. Vestibulum eu malesuada est, vitae blandit augue. Phasellus mauris nisl, cursus quis nunc ut, vulputate condimentum felis. Aenean ut arcu orci. Morbi eget tempor diam. Curabitur semper lorem a nisi sagittis blandit. Nam non urna ligula."})
 	msgs = append(msgs, Message{"m.text", 1277, "alice", "Praesent pretium eu sapien sollicitudin blandit. Nullam lacinia est ut neque suscipit congue. In ullamcorper congue ornare. Donec lacus arcu, faucibus ut interdum eget, aliquet sed leo. Suspendisse eget congue massa, at ornare nunc. Cras ac est nunc. Morbi lacinia placerat varius. Cras imperdiet augue eu enim condimentum gravida nec nec est."})
+	for i := int64(0); i < 120; i++ {
+		msgs = append(msgs, Message{"m.text", 1278 + i, "anon", fmt.Sprintf("msg #%3d", i)})
+	}
+}
+
+func initReadline() {
+	readline_buff = make([]Words, 1)
+	readline_idx = 0
+	readline_multiline = false
+}
+
+func scrollChat(g *gocui.Gui, v *gocui.View, l int) error {
+	v_chat, err := g.View("chat")
+	if err != nil {
+		return err
+	}
+	v_timeline, err := g.View("timeline")
+	if err != nil {
+		return err
+	}
+	x_c, y_c := v_chat.Origin()
+	x_t, y_t := v_timeline.Origin()
+	v_chat.SetOrigin(x_c, y_c+l)
+	v_timeline.SetOrigin(x_t, y_t+l)
+	return nil
 }
 
 func main() {
-	init_msgs()
+	initMsgs()
+	initReadline()
 	debug_buf = bytes.NewBufferString("")
 	g, err := gocui.NewGui(gocui.OutputNormal)
 	if err != nil {
@@ -53,16 +113,29 @@ func main() {
 	defer g.Close()
 
 	g.SetManagerFunc(layout)
+	g.Cursor = true
 
 	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
 		log.Panicln(err)
 	}
-	if err := g.SetKeybinding("", gocui.KeyF6, gocui.ModNone, key_debug_toggle); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyF7, gocui.ModNone, keyDebugToggle); err != nil {
 		log.Panicln(err)
 	}
-	if err := g.SetKeybinding("", gocui.KeyEnter, gocui.ModNone, key_send_msg); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyF6, gocui.ModNone, keyReadmultiLineToggle); err != nil {
 		log.Panicln(err)
 	}
+	if err := g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone,
+		func(g *gocui.Gui, v *gocui.View) error { return scrollChat(g, v, -1) }); err != nil {
+		log.Panicln(err)
+	}
+	if err := g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone,
+		func(g *gocui.Gui, v *gocui.View) error { return scrollChat(g, v, 1) }); err != nil {
+		log.Panicln(err)
+	}
+	// TODO
+	// F11 / F12: scroll nicklist
+	// F9 / F10: scroll roomlist
+	// PgUp / PgDn: scroll text in current buffer
 
 	if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
 		log.Panicln(err)
@@ -148,6 +221,7 @@ func layout(g *gocui.Gui) error {
 		if err == gocui.ErrUnknownView {
 			v.Frame = false
 			v.Editable = true
+			v.Editor = ReadLineEditor
 		}
 		fmt.Fprintln(v, "")
 	}
@@ -235,7 +309,7 @@ func quit(g *gocui.Gui, v *gocui.View) error {
 	return gocui.ErrQuit
 }
 
-func key_debug_toggle(g *gocui.Gui, v *gocui.View) error {
+func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 	maxX, maxY := g.Size()
 	if _, err := g.View("debug"); err == nil {
 		g.DeleteView("debug")
@@ -255,19 +329,25 @@ func key_debug_toggle(g *gocui.Gui, v *gocui.View) error {
 	return nil
 }
 
-func key_send_msg(g *gocui.Gui, v *gocui.View) error {
+func sendMsg(body string) error {
+	msg := Message{"m.text", time.Now().Unix(), my_nick, body[:len(body)-1]}
+	msgs = append(msgs, msg)
+	return nil
+}
+
+func keyReadmultiLineToggle(g *gocui.Gui, v *gocui.View) error {
 	v_readline, err := g.View("readline")
 	if err != nil {
 		return err
 	}
-	body := v_readline.Buffer()
-	v_readline.Clear()
-	v_readline.SetOrigin(0, 0)
-	v_readline.SetCursor(0, 0)
-	if len(body) == 0 {
-		return nil
+	if readline_multiline {
+		readline_multiline = false
+		readline_h = 1
+		v_readline.Editor = ReadLineEditor
+	} else {
+		readline_multiline = true
+		readline_h = 5
+		v_readline.Editor = ReadMultiLineEditor
 	}
-	msg := Message{"m.text", time.Now().Unix(), my_nick, body[:len(body)-1]}
-	msgs = append(msgs, msg)
 	return nil
 }

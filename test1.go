@@ -42,6 +42,7 @@ func main() {
 	}
 
 	cli.SendText("!cZaiLMbuSWouYFGEDS:matrix.org", "OLA K ASE")
+	cli.SetDisplayName("RAYON 5")
 
 	syncer := cli.Syncer.(*gomatrix.DefaultSyncer)
 	syncer.OnEventType("m.room.message", func(ev *gomatrix.Event) {

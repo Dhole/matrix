@@ -4,12 +4,21 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/jroimartin/gocui"
+	"hash/adler32"
 	"io"
 	"log"
 	"sort"
 	"strings"
 	"time"
 )
+
+var NickRGBColors []RGBColor = []RGBColor{RGBColor{255, 89, 89}, RGBColor{255, 138, 89}, RGBColor{255, 188, 89}, RGBColor{255, 238, 89}, RGBColor{221, 255, 89}, RGBColor{172, 255, 89}, RGBColor{122, 255, 89}, RGBColor{89, 255, 105}, RGBColor{89, 255, 155}, RGBColor{89, 255, 205}, RGBColor{89, 255, 255}, RGBColor{89, 205, 255}, RGBColor{89, 155, 255}, RGBColor{89, 105, 255}, RGBColor{122, 89, 255}, RGBColor{172, 89, 255}, RGBColor{221, 89, 255}, RGBColor{255, 89, 238}, RGBColor{255, 89, 188}, RGBColor{255, 89, 138}}
+
+var Nick256Colors []byte = []byte{27, 32, 37, 42, 47, 82, 76, 70, 63, 93, 88, 95, 102, 109, 116, 120, 155, 149, 142, 136, 135, 129, 166, 183, 184, 191, 226, 220, 214, 208}
+
+type RGBColor struct {
+	r, g, b byte
+}
 
 type Message struct {
 	Msgtype string
@@ -27,11 +36,12 @@ const (
 )
 
 type User struct {
-	Id       string
-	Name     string
-	DispName string
-	Power    int
-	Mem      Membership
+	Id           string
+	Name         string
+	DispName     string
+	DispNameHash uint32
+	Power        int
+	Mem          Membership
 }
 
 type Users struct {
@@ -65,8 +75,8 @@ type Words []string
 // CONFIG
 
 var view_rooms_w int = 24
-var view_users_w int = 24
-var view_timeline_w int = 22
+var view_users_w int = 22
+var view_timeline_w int = 12 + 11
 var view_msgs_min_w int = 26
 
 var window_w int = -1
@@ -143,6 +153,9 @@ func (u *User) String() string {
 
 func (u *User) UpdateDispName(r *Room) {
 	defer r.UpdateDispName()
+	defer func() {
+		u.DispNameHash = adler32.Checksum([]byte(u.DispName))
+	}()
 	if u.Name == "" {
 		u.DispName = u.Id
 		return
@@ -186,6 +199,8 @@ func initMsgs() {
 	*msgs = append(*msgs, Message{"m.text", 1246, "@b:matrix.org", "OLA K DISE"})
 	*msgs = append(*msgs, Message{"m.text", 1249, "@a:matrix.org", "Pos por ahi, con la moto"})
 	*msgs = append(*msgs, Message{"m.text", 1249, "@foobar:matrix.org", "Andaaa, poh no me digas      mas  hehe     toma tomate"})
+	*msgs = append(*msgs, Message{"m.text", 1250, "@steve1:matrix.org", "Bon dia"})
+	*msgs = append(*msgs, Message{"m.text", 1252, "@steve2:matrix.org", "Bona nit"})
 	*msgs = append(*msgs, Message{"m.text", 1258, "@a:matrix.org", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Proin eget diam egestas, sollicitudin sapien eu, gravida tortor. Vestibulum eu malesuada est, vitae blandit augue. Phasellus mauris nisl, cursus quis nunc ut, vulputate condimentum felis. Aenean ut arcu orci. Morbi eget tempor diam. Curabitur semper lorem a nisi sagittis blandit. Nam non urna ligula."})
 	*msgs = append(*msgs, Message{"m.text", 1277, "@a:matrix.org", "Praesent pretium eu sapien sollicitudin blandit. Nullam lacinia est ut neque suscipit congue. In ullamcorper congue ornare. Donec lacus arcu, faucibus ut interdum eget, aliquet sed leo. Suspendisse eget congue massa, at ornare nunc. Cras ac est nunc. Morbi lacinia placerat varius. Cras imperdiet augue eu enim condimentum gravida nec nec est."})
 	for i := int64(0); i < 120; i++ {
@@ -200,7 +215,15 @@ func NewUsers() (us Users) {
 	return us
 }
 
-func (us *Users) Add(u *User) {
+func (us *Users) Add(id, name string, power int, mem Membership) {
+	u := &User{
+		Id:           id,
+		Name:         name,
+		DispName:     "",
+		DispNameHash: 0,
+		Power:        power,
+		Mem:          mem,
+	}
 	us.U = append(us.U, u)
 	us.ById[u.Id] = u
 	if u.Name != "" {
@@ -268,18 +291,18 @@ func initRooms() {
 	rs.Add(NewRoom("!xAbiTnitnIIjlhlaWC:matrix.org", "Criptica", "Defensant la teva privacitat des de 1984"))
 	currentRoom = rs.R[1]
 
-	rs.R[0].Users.Add(&User{MyUserID, MyUserName, "", 0, MemJoin})
-	rs.R[0].Users.Add(&User{"@a:matrix.org", "Alice", "", 0, MemJoin})
+	rs.R[0].Users.Add(MyUserID, MyUserName, 0, MemJoin)
+	rs.R[0].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
 
-	rs.R[1].Users.Add(&User{MyUserID, MyUserName, "N", 100, MemJoin})
-	rs.R[1].Users.Add(&User{"@a:matrix.org", "Alice", "", 100, MemJoin})
-	rs.R[1].Users.Add(&User{"@b:matrix.org", "Bob", "", 100, MemJoin})
-	rs.R[1].Users.Add(&User{"@e:matrix.org", "Eve", "", 0, MemJoin})
-	rs.R[1].Users.Add(&User{"@m:matrix.org", "Mallory", "", 0, MemJoin})
-	rs.R[1].Users.Add(&User{"@anon:matrix.org", "Anon", "", 0, MemJoin})
-	rs.R[1].Users.Add(&User{"@steve1:matrix.org", "Steve", "", 0, MemJoin})
-	rs.R[1].Users.Add(&User{"@steve2:matrix.org", "Steve", "", 0, MemJoin})
-	rs.R[1].Users.Add(&User{"@foobar:matrix.org", "my_user_name_is_very_long", "", 0, MemJoin})
+	rs.R[1].Users.Add(MyUserID, MyUserName, 100, MemJoin)
+	rs.R[1].Users.Add("@a:matrix.org", "Alice", 100, MemJoin)
+	rs.R[1].Users.Add("@b:matrix.org", "Bob", 100, MemJoin)
+	rs.R[1].Users.Add("@e:matrix.org", "Eve", 0, MemJoin)
+	rs.R[1].Users.Add("@m:matrix.org", "Mallory", 0, MemJoin)
+	rs.R[1].Users.Add("@anon:matrix.org", "Anon", 0, MemJoin)
+	rs.R[1].Users.Add("@steve1:matrix.org", "Steve", 0, MemJoin)
+	rs.R[1].Users.Add("@steve2:matrix.org", "Steve", 0, MemJoin)
+	rs.R[1].Users.Add("@foobar:matrix.org", "my_user_name_is_very_long", 0, MemJoin)
 
 	for _, u := range rs.R[0].Users.U {
 		u.UpdateDispName(rs.R[0])
@@ -319,7 +342,8 @@ func main() {
 	initRooms()
 	initMsgs()
 	initReadline()
-	g, err := gocui.NewGui(gocui.OutputNormal)
+	g, err := gocui.NewGui(gocui.Output256)
+	//g, err := gocui.NewGui(gocui.Output)
 	if err != nil {
 		log.Panicln(err)
 	}
@@ -410,7 +434,7 @@ func layout(g *gocui.Gui) error {
 		fmt.Fprintln(v, " 7.#openbsd")
 		fmt.Fprintln(v, " 8.#gbdev")
 		fmt.Fprintln(v, " 9.#archlinux")
-		fmt.Fprintln(v, "10.#rust")
+		fmt.Fprintln(v, " a.#rust")
 	}
 	if v, err := g.SetView("users", maxX-view_users_w, -1, maxX, maxY); err != nil {
 		if err != gocui.ErrUnknownView {
@@ -419,14 +443,10 @@ func layout(g *gocui.Gui) error {
 		if err == gocui.ErrUnknownView {
 			v.Frame = true
 		}
-		fmt.Fprintln(v, "@alice")
-		fmt.Fprintln(v, "@bob")
-		fmt.Fprintln(v, "@dhole")
-		fmt.Fprintln(v, " eve")
-		fmt.Fprintln(v, " mallory")
-		fmt.Fprintln(v, " anon")
-		fmt.Fprintln(v, " steve")
-		fmt.Fprintln(v, " my_user_name_is_very_long")
+		for _, u := range currentRoom.Users.U {
+			//fmt.Fprintln(v, StrPad(u.DispName, view_users_w-1))
+			fmt.Fprintln(v, u.DispName)
+		}
 	}
 	if v, err := g.SetView("readline", view_rooms_w, maxY-1-readline_h, maxX-view_users_w, maxY); err != nil {
 		if err != gocui.ErrUnknownView {
@@ -439,7 +459,7 @@ func layout(g *gocui.Gui) error {
 		}
 		fmt.Fprintln(v, "")
 	}
-	if v, err := g.SetView("statusline", view_rooms_w, maxY-2-readline_h, maxX-view_rooms_w, maxY-readline_h); err != nil {
+	if v, err := g.SetView("statusline", view_rooms_w, maxY-2-readline_h, maxX-view_users_w, maxY-readline_h); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
@@ -460,7 +480,7 @@ func layout(g *gocui.Gui) error {
 		//fmt.Fprintln(v, "\x1b[0;33m01:40:56\x1b[0;36m      alice \x1b[0;35m| ")
 		//fmt.Fprintln(v, "\x1b[0;33m01:40:58\x1b[0;32m        bob \x1b[0;35m| ")
 	}
-	v_msgs, err := g.SetView("msgs", view_rooms_w+view_timeline_w+1, -1, maxX-view_rooms_w, maxY-1-readline_h)
+	v_msgs, err := g.SetView("msgs", view_rooms_w+view_timeline_w+1, -1, maxX-view_users_w, maxY-1-readline_h)
 	if err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -504,7 +524,13 @@ func printMessage(viewTimeline io.Writer, viewMsg io.Writer, msgWidth int, m *Me
 	//}
 	fmt.Fprintln(debug_buf, r.Users.U[1])
 	fmt.Fprintln(debug_buf, r.Users.ById[user.Id])
-	fmt.Fprintln(viewTimeline, t.Format("15:04:05"), StrPad(user.String(), view_timeline_w-11), "|")
+	username := StrPad(user.String(), view_timeline_w-11)
+	//color := NickRGBColors[user.DispNameHash%uint32(len(NickRGBColors))]
+	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
+	color := Nick256Colors[user.DispNameHash%uint32(len(Nick256Colors))]
+	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
+	//username = fmt.Sprintf("\x1b[38;2;255;0;0m%s\x1b[0;0m", "HOLA")
+	fmt.Fprintln(viewTimeline, t.Format("15:04:05"), username, "|")
 	lines := 1
 	s_len := 0
 	for i, w := range strings.Split(m.Body, " ") {

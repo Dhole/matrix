@@ -14,7 +14,7 @@ import (
 
 var NickRGBColors []RGBColor = []RGBColor{RGBColor{255, 89, 89}, RGBColor{255, 138, 89}, RGBColor{255, 188, 89}, RGBColor{255, 238, 89}, RGBColor{221, 255, 89}, RGBColor{172, 255, 89}, RGBColor{122, 255, 89}, RGBColor{89, 255, 105}, RGBColor{89, 255, 155}, RGBColor{89, 255, 205}, RGBColor{89, 255, 255}, RGBColor{89, 205, 255}, RGBColor{89, 155, 255}, RGBColor{89, 105, 255}, RGBColor{122, 89, 255}, RGBColor{172, 89, 255}, RGBColor{221, 89, 255}, RGBColor{255, 89, 238}, RGBColor{255, 89, 188}, RGBColor{255, 89, 138}}
 
-var Nick256Colors []byte = []byte{27, 32, 37, 42, 47, 82, 76, 70, 63, 93, 88, 95, 102, 109, 116, 120, 155, 149, 142, 136, 135, 129, 166, 183, 184, 191, 226, 220, 214, 208}
+var Nick256Colors []byte = []byte{39, 51, 37, 42, 47, 82, 76, 70, 69, 105, 126, 95, 102, 109, 116, 120, 155, 149, 142, 136, 135, 141, 166, 183, 184, 191, 226, 220, 214, 208}
 
 type RGBColor struct {
 	r, g, b byte
@@ -51,17 +51,16 @@ type Users struct {
 }
 
 type Room struct {
-	Id              string
-	Name            string
-	DispName        string
-	Alias           string
-	Topic           string
-	Fav             bool
-	Users           Users
-	Msgs            []Message
-	ViewUsersBuf    *string
-	ViewTimelineBuf *string
-	ViewMsgsBuf     *string
+	Id           string
+	Name         string
+	DispName     string
+	Alias        string
+	Topic        string
+	Fav          bool
+	Users        Users
+	Msgs         []Message
+	ViewUsersBuf *string
+	ViewMsgsBuf  *string
 }
 
 type Rooms struct {
@@ -76,7 +75,7 @@ type Words []string
 
 var view_rooms_w int = 24
 var view_users_w int = 22
-var view_timeline_w int = 12 + 11
+var view_timeline_w int = 14 + 11
 var view_msgs_min_w int = 26
 
 var window_w int = -1
@@ -326,14 +325,8 @@ func scrollChat(g *gocui.Gui, v *gocui.View, l int) error {
 	if err != nil {
 		return err
 	}
-	v_timeline, err := g.View("timeline")
-	if err != nil {
-		return err
-	}
 	x_c, y_c := v_msgs.Origin()
-	x_t, y_t := v_timeline.Origin()
 	v_msgs.SetOrigin(x_c, y_c+l)
-	v_timeline.SetOrigin(x_t, y_t+l)
 	return nil
 }
 
@@ -469,18 +462,7 @@ func layout(g *gocui.Gui) error {
 		}
 		fmt.Fprintln(v, "\x1b[0;37m[03:14] [@dhole:matrix.org(+)] 2:#debian-reproducible [6] {encrypted}")
 	}
-	v_timeline, err := g.SetView("timeline", view_rooms_w, -1, view_rooms_w+view_timeline_w+1, maxY-1-readline_h)
-	if err != nil {
-		if err != gocui.ErrUnknownView {
-			return err
-		}
-		if err == gocui.ErrUnknownView {
-			v_timeline.Frame = false
-		}
-		//fmt.Fprintln(v, "\x1b[0;33m01:40:56\x1b[0;36m      alice \x1b[0;35m| ")
-		//fmt.Fprintln(v, "\x1b[0;33m01:40:58\x1b[0;32m        bob \x1b[0;35m| ")
-	}
-	v_msgs, err := g.SetView("msgs", view_rooms_w+view_timeline_w+1, -1, maxX-view_users_w, maxY-1-readline_h)
+	v_msgs, err := g.SetView("msgs", view_rooms_w, -1, maxX-view_users_w, maxY-1-readline_h)
 	if err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
@@ -494,13 +476,16 @@ func layout(g *gocui.Gui) error {
 	}
 	if win_new_size {
 		v_msgs.Clear()
-		v_timeline.Clear()
 		//debug_buf.Reset()
 		fmt.Fprintln(debug_buf, "New Size at", time.Now())
 		v_msgs_w, _ := v_msgs.Size()
 		//fmt.Fprintln(v_debug, "v_msgs_w =", v_msgs_w)
+		// Nick Color test
+		//for _, c := range Nick256Colors {
+		//	fmt.Fprintf(v_msgs, "\x1b[38;5;%dm%03d\x1b[0;0m\n", c, c)
+		//}
 		for _, m := range currentRoom.Msgs {
-			printMessage(v_timeline, v_msgs, v_msgs_w, &m, currentRoom)
+			printMessage(v_msgs, v_msgs_w, &m, currentRoom)
 		}
 	}
 	if _, err := g.View("debug"); err == nil {
@@ -513,7 +498,7 @@ func layout(g *gocui.Gui) error {
 	return nil
 }
 
-func printMessage(viewTimeline io.Writer, viewMsg io.Writer, msgWidth int, m *Message, r *Room) {
+func printMessage(viewMsg io.Writer, msgWidth int, m *Message, r *Room) {
 	t := time.Unix(m.Ts, 0)
 	user := r.Users.ById[m.UserID]
 	//displayName := ""
@@ -524,19 +509,19 @@ func printMessage(viewTimeline io.Writer, viewMsg io.Writer, msgWidth int, m *Me
 	//}
 	fmt.Fprintln(debug_buf, r.Users.U[1])
 	fmt.Fprintln(debug_buf, r.Users.ById[user.Id])
-	username := StrPad(user.String(), view_timeline_w-11)
+	username := StrPad(user.String(), view_timeline_w-10)
 	//color := NickRGBColors[user.DispNameHash%uint32(len(NickRGBColors))]
 	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
 	color := Nick256Colors[user.DispNameHash%uint32(len(Nick256Colors))]
 	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
 	//username = fmt.Sprintf("\x1b[38;2;255;0;0m%s\x1b[0;0m", "HOLA")
-	fmt.Fprintln(viewTimeline, t.Format("15:04:05"), username, "|")
+	fmt.Fprint(viewMsg, t.Format("15:04:05"), " ", username, " ")
 	lines := 1
 	s_len := 0
 	for i, w := range strings.Split(m.Body, " ") {
-		if s_len+len(w)+1 > msgWidth {
+		if s_len+len(w)+1 > msgWidth-view_timeline_w {
 			if s_len != 0 {
-				fmt.Fprint(viewMsg, "\n")
+				fmt.Fprint(viewMsg, "\n", strings.Repeat(" ", view_timeline_w))
 				lines += 1
 				s_len = 0
 			}
@@ -553,10 +538,10 @@ func printMessage(viewTimeline io.Writer, viewMsg io.Writer, msgWidth int, m *Me
 		}
 	}
 	fmt.Fprint(viewMsg, "\n")
-	if lines > 1 {
-		//fmt.Fprintln(debug_buf, "Extra newline in v_timeline")
-		fmt.Fprint(viewTimeline, strings.Repeat(StrPad("|", view_timeline_w)+"\n", lines-1))
-	}
+	//if lines > 1 {
+	//	//fmt.Fprintln(debug_buf, "Extra newline in v_timeline")
+	//	fmt.Fprint(viewTimeline, strings.Repeat(StrPad("|", view_timeline_w)+"\n", lines-1))
+	//}
 }
 
 func quit(g *gocui.Gui, v *gocui.View) error {

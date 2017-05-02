@@ -1,4 +1,4 @@
-package main
+package trinity
 
 import (
 	"../list"
@@ -22,9 +22,9 @@ type RGBColor struct {
 }
 
 type Message struct {
-	Msgtype string
+	MsgType string
 	Ts      int64
-	UserID  string
+	UserId  string
 	Body    string
 }
 
@@ -98,8 +98,8 @@ var displayNamesId = false
 
 // GLOBALS
 
-var MyUserName = "dhole"
-var MyUserID = "@dhole:matrix.org"
+var myUsername string
+var myUserId string
 
 var currentRoom *Room
 var rs Rooms
@@ -121,8 +121,9 @@ var sentMsgsChan chan struct {
 	*Message
 	*Room
 }
+var rePrintChan chan string
 
-var initialized bool
+var started bool
 
 // END GLOBALS
 
@@ -141,7 +142,7 @@ func (r *Room) UpdateDispName() {
 	}
 	roomUserIds := make([]string, 0)
 	for k := range r.Users.ById {
-		if k == MyUserID {
+		if k == myUserId {
 			continue
 		}
 		roomUserIds = append(roomUserIds, k)
@@ -203,7 +204,64 @@ func max(x, y int) int {
 	return y
 }
 
+var modeLongRoomShortcut bool
+var longRoomShortcutDec int = -1
+
+func shortcuts(key gocui.Key, ch rune, mod gocui.Modifier) bool {
+	roomShortcut := -1
+	if modeLongRoomShortcut {
+		switch {
+		case ch >= '0' && ch <= '9':
+			if longRoomShortcutDec == -1 {
+				longRoomShortcutDec = int(ch - '0')
+			} else {
+				roomShortcut = int(ch-'0') + longRoomShortcutDec*10
+				longRoomShortcutDec = -1
+				modeLongRoomShortcut = false
+			}
+		default:
+			longRoomShortcutDec = -1
+			modeLongRoomShortcut = false
+		}
+	} else {
+		switch {
+		case mod == gocui.ModAlt && ch == '1':
+			roomShortcut = 1
+		case mod == gocui.ModAlt && ch == '2':
+			roomShortcut = 2
+		case mod == gocui.ModAlt && ch == '3':
+			roomShortcut = 3
+		case mod == gocui.ModAlt && ch == '4':
+			roomShortcut = 4
+		case mod == gocui.ModAlt && ch == '5':
+			roomShortcut = 5
+		case mod == gocui.ModAlt && ch == '6':
+			roomShortcut = 6
+		case mod == gocui.ModAlt && ch == '7':
+			roomShortcut = 7
+		case mod == gocui.ModAlt && ch == '8':
+			roomShortcut = 8
+		case mod == gocui.ModAlt && ch == '9':
+			roomShortcut = 9
+		case mod == gocui.ModAlt && ch == 'j':
+			modeLongRoomShortcut = true
+		default:
+			return false
+		}
+	}
+	if roomShortcut != -1 {
+		r, ok := rs.ByShortcut[roomShortcut]
+		if ok {
+			setCurrentRoom(r)
+		}
+	}
+	return true
+}
+
 func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
+	if shortcuts(key, ch, mod) {
+		return
+	}
 	switch {
 	case ch != 0 && mod == 0:
 		v.EditWrite(ch)
@@ -231,21 +289,6 @@ func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 func readMultiLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 	// TODO
 	readLine(v, key, ch, mod)
-}
-
-func initMsgs() {
-	msgs := rs.R[1].Msgs
-	msgs.PushBack(Message{"m.text", 1234, "@a:matrix.org", "OLA K ASE"})
-	msgs.PushBack(Message{"m.text", 1246, "@b:matrix.org", "OLA K DISE"})
-	msgs.PushBack(Message{"m.text", 1249, "@a:matrix.org", "Pos por ahi, con la moto"})
-	msgs.PushBack(Message{"m.text", 1249, "@foobar:matrix.org", "Andaaa, poh no me digas      mas  hehe     toma tomate"})
-	msgs.PushBack(Message{"m.text", 1250, "@steve1:matrix.org", "Bon dia"})
-	msgs.PushBack(Message{"m.text", 1252, "@steve2:matrix.org", "Bona nit"})
-	msgs.PushBack(Message{"m.text", 1258, "@a:matrix.org", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Proin eget diam egestas, sollicitudin sapien eu, gravida tortor. Vestibulum eu malesuada est, vitae blandit augue. Phasellus mauris nisl, cursus quis nunc ut, vulputate condimentum felis. Aenean ut arcu orci. Morbi eget tempor diam. Curabitur semper lorem a nisi sagittis blandit. Nam non urna ligula."})
-	msgs.PushBack(Message{"m.text", 1277, "@a:matrix.org", "Praesent pretium eu sapien sollicitudin blandit. Nullam lacinia est ut neque suscipit congue. In ullamcorper congue ornare. Donec lacus arcu, faucibus ut interdum eget, aliquet sed leo. Suspendisse eget congue massa, at ornare nunc. Cras ac est nunc. Morbi lacinia placerat varius. Cras imperdiet augue eu enim condimentum gravida nec nec est."})
-	for i := int64(0); i < 120; i++ {
-		msgs.PushBack(Message{"m.text", 1278 + i, "@anon:matrix.org", fmt.Sprintf("msg #%3d", i)})
-	}
 }
 
 func NewUsers() (us Users) {
@@ -287,7 +330,7 @@ func (us *Users) SetUserName(u User, name string) {
 	// TODO: What if there are two users with the same name?
 }
 
-func NewRoom(id string, name string, topic string) (r *Room) {
+func NewRoom(id, name, topic string) (r *Room) {
 	r = &Room{}
 	r.Id = id
 	r.Name = name
@@ -336,6 +379,7 @@ func (rs *Rooms) UpdateShortcuts() {
 			count++
 			r.Shortcut = count
 			rs.PeopleRooms = append(rs.PeopleRooms, r)
+			rs.ByShortcut[r.Shortcut] = r
 		}
 	}
 	for _, r := range rs.R {
@@ -343,75 +387,75 @@ func (rs *Rooms) UpdateShortcuts() {
 			count++
 			r.Shortcut = count
 			rs.GroupRooms = append(rs.GroupRooms, r)
+			rs.ByShortcut[r.Shortcut] = r
 		}
 	}
 }
 
-func initRooms() {
-	rs = NewRooms()
-	rs.Add(NewRoom("!cZaiLMbuSWouYFGEDS:matrix.org", "", ""))
-	rs.Add(NewRoom("!xAbiTnitnIIjlhlaWC:matrix.org", "Criptica", "Defensant la teva privacitat des de 1984"))
+func SetMyUsername(username string) {
+	myUsername = username
+}
 
-	currentRoom = rs.R[1]
+func SetMyUserId(userId string) {
+	myUserId = userId
+}
 
-	rs.R[0].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[0].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-
-	rs.R[1].Users.Add(MyUserID, MyUserName, 100, MemJoin)
-	rs.R[1].Users.Add("@a:matrix.org", "Alice", 100, MemJoin)
-	rs.R[1].Users.Add("@b:matrix.org", "Bob", 100, MemJoin)
-	rs.R[1].Users.Add("@e:matrix.org", "Eve", 0, MemJoin)
-	rs.R[1].Users.Add("@m:matrix.org", "Mallory", 0, MemJoin)
-	rs.R[1].Users.Add("@anon:matrix.org", "Anon", 0, MemJoin)
-	rs.R[1].Users.Add("@steve1:matrix.org", "Steve", 0, MemJoin)
-	rs.R[1].Users.Add("@steve2:matrix.org", "Steve", 0, MemJoin)
-	rs.R[1].Users.Add("@foobar:matrix.org", "my_user_name_is_very_long", 0, MemJoin)
-
-	rs.Add(NewRoom("!aAbiTnitnIIjlhlaWC:matrix.org", "", ""))
-	rs.R[2].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[2].Users.Add("@j:matrix.org", "Johnny", 0, MemJoin)
-
-	rs.Add(NewRoom("!bAbiTnitnIIjlhlaWC:matrix.org", "", ""))
-	rs.R[3].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[3].Users.Add("@ja:matrix.org", "Jane", 0, MemJoin)
-
-	rs.Add(NewRoom("!cAbiTnitnIIjlhlaWC:matrix.org", "#debian-reproducible", ""))
-	rs.R[4].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[4].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-	rs.R[4].Users.Add("@b:matrix.org", "Bob", 0, MemJoin)
-
-	rs.Add(NewRoom("!dAbiTnitnIIjlhlaWC:matrix.org", "#reproducible-builds", ""))
-	rs.R[5].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[5].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-	rs.R[5].Users.Add("@b:matrix.org", "Bob", 0, MemJoin)
-	rs.Add(NewRoom("!dAbiTnitnIIjlhlaWC:matrix.org", "#openbsd", ""))
-	rs.R[6].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[6].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-	rs.R[6].Users.Add("@b:matrix.org", "Bob", 0, MemJoin)
-	rs.Add(NewRoom("!dAbiTnitnIIjlhlaWC:matrix.org", "#gbdev", ""))
-	rs.R[7].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[7].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-	rs.R[7].Users.Add("@b:matrix.org", "Bob", 0, MemJoin)
-	rs.Add(NewRoom("!dAbiTnitnIIjlhlaWC:matrix.org", "#archlinux", ""))
-	rs.R[8].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[8].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-	rs.R[8].Users.Add("@b:matrix.org", "Bob", 0, MemJoin)
-	rs.Add(NewRoom("!dAbiTnitnIIjlhlaWC:matrix.org", "#rust", ""))
-	rs.R[9].Users.Add(MyUserID, MyUserName, 0, MemJoin)
-	rs.R[9].Users.Add("@a:matrix.org", "Alice", 0, MemJoin)
-	rs.R[9].Users.Add("@b:matrix.org", "Bob", 0, MemJoin)
-
-	for _, r := range rs.R {
-		for _, u := range r.Users.U {
-			u.UpdateDispName(r)
-		}
-		for _, u := range r.Users.U {
-			u.UpdateDispName(r)
-		}
-		r.UpdateDispName()
+func AddRoom(roomId, name, topic string) error {
+	_, ok := rs.ById[roomId]
+	if ok {
+		return fmt.Errorf("Room %v already exists", roomId)
 	}
+	r := NewRoom(roomId, name, topic)
+	r.UpdateDispName()
+	rs.Add(r)
 	rs.UpdateShortcuts()
-	//fmt.Fprintln(debugBuf, rs.R[1].Users.U[0])
+	if started {
+		if r == currentRoom {
+			rePrintChan <- "rooms"
+		}
+	}
+	return nil
+}
+
+func AddUser(roomId, userId, username string, power int, membership Membership) error {
+	r, ok := rs.ById[roomId]
+	if !ok {
+		return fmt.Errorf("Room %v doesn't exist", roomId)
+	}
+	r.Users.Add(userId, username, power, membership)
+	for _, u := range r.Users.U {
+		u.UpdateDispName(r)
+	}
+	r.UpdateDispName()
+	if started {
+		if r == currentRoom {
+			rePrintChan <- "users"
+			rePrintChan <- "statusline"
+		}
+	}
+	return nil
+}
+
+func AddMessage(roomId, msgType string, ts int64, userId, body string) error {
+	r, ok := rs.ById[roomId]
+	if !ok {
+		return fmt.Errorf("Room %v doesn't exist", roomId)
+	}
+	_, ok = r.Users.ById[userId]
+	if !ok {
+		return fmt.Errorf("User %v doesn't exist in room %v", userId, roomId)
+	}
+	m := Message{msgType, ts, userId, body}
+	if started {
+		sentMsgsChan <- struct {
+			*Message
+			*Room
+		}{&m, r}
+	} else {
+		r.Msgs.PushBack(m)
+	}
+
+	return nil
 }
 
 func initReadline() {
@@ -442,9 +486,9 @@ func eventLoop(g *gocui.Gui) {
 	for {
 		select {
 		case mr := <-sentMsgsChan:
+			mr.Room.Msgs.PushBack(*mr.Message)
 			g.Execute(func(g *gocui.Gui) error {
 				viewMsgs, _ := g.View("msgs")
-				mr.Room.Msgs.PushBack(*mr.Message)
 				_, y := viewMsgs.Origin()
 				scrollBottom := false
 				if y == viewMsgsLines-viewMsgsHeight {
@@ -456,15 +500,51 @@ func eventLoop(g *gocui.Gui) {
 				}
 				return nil
 			})
+		case view := <-rePrintChan:
+			g.Execute(func(g *gocui.Gui) error {
+				views := []string{view}
+				if view == "all" {
+					views = []string{"rooms", "msgs", "users",
+						"readline", "statusline"}
+				}
+				for _, view := range views {
+					switch view {
+					case "rooms":
+						v, _ := g.View(view)
+						printRooms(v)
+					case "msgs":
+						v, _ := g.View(view)
+						printRoomMessages(v, currentRoom)
+					case "users":
+						v, _ := g.View(view)
+						printRoomUsers(v, currentRoom)
+					case "readline":
+						// TODO
+						//v, _ := g.View(view)
+						//printStatusLine(v, currentRoom)
+					case "statusline":
+						v, _ := g.View(view)
+						printStatusLine(v, currentRoom)
+					}
+				}
+				return nil
+			})
 		}
 
 	}
 }
 
-func main() {
+func Init() {
+	rs = NewRooms()
+}
+
+func Start() {
 	debugBuf = bytes.NewBufferString("")
-	initRooms()
-	initMsgs()
+	// DEBUG START
+	setCurrentRoom(rs.R[0])
+	// DEBUG END
+	//initRooms()
+	//initMsgs()
 	initReadline()
 	g, err := gocui.NewGui(gocui.Output256)
 	//g, err := gocui.NewGui(gocui.Output)
@@ -476,29 +556,40 @@ func main() {
 	g.SetManagerFunc(layout)
 	g.Cursor = true
 
-	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone,
+		quit); err != nil {
 		log.Panicln(err)
 	}
-	if err := g.SetKeybinding("", gocui.KeyF7, gocui.ModNone, keyDebugToggle); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyF7, gocui.ModNone,
+		keyDebugToggle); err != nil {
 		log.Panicln(err)
 	}
-	if err := g.SetKeybinding("", gocui.KeyF6, gocui.ModNone, keyReadmultiLineToggle); err != nil {
+	if err := g.SetKeybinding("", gocui.KeyF6, gocui.ModNone,
+		keyReadmultiLineToggle); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone,
-		func(g *gocui.Gui, v *gocui.View) error { return scrollViewMsgs(g, v, -1) }); err != nil {
+		func(g *gocui.Gui, v *gocui.View) error {
+			return scrollViewMsgs(g, v, -1)
+		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone,
-		func(g *gocui.Gui, v *gocui.View) error { return scrollViewMsgs(g, v, 1) }); err != nil {
+		func(g *gocui.Gui, v *gocui.View) error {
+			return scrollViewMsgs(g, v, 1)
+		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyCtrlU, gocui.ModNone,
-		func(g *gocui.Gui, v *gocui.View) error { return scrollViewMsgs(g, v, -viewMsgsHeight/2) }); err != nil {
+		func(g *gocui.Gui, v *gocui.View) error {
+			return scrollViewMsgs(g, v, -viewMsgsHeight/2)
+		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyCtrlD, gocui.ModNone,
-		func(g *gocui.Gui, v *gocui.View) error { return scrollViewMsgs(g, v, viewMsgsHeight/2) }); err != nil {
+		func(g *gocui.Gui, v *gocui.View) error {
+			return scrollViewMsgs(g, v, viewMsgsHeight/2)
+		}); err != nil {
 		log.Panicln(err)
 	}
 	// TODO
@@ -510,20 +601,38 @@ func main() {
 	sentMsgsChan = make(chan struct {
 		*Message
 		*Room
-	})
+	}, 16)
+	rePrintChan = make(chan string, 16)
 
 	go eventLoop(g)
 
+	go func() {
+		time.Sleep(time.Duration(30) * time.Second)
+		rePrintChan <- "statusline"
+	}()
+	started = true
 	if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
 		log.Panicln(err)
 	}
 }
 
-func StrPad(s string, pLen int, pad rune) string {
+func strPad(s string, pLen int, pad rune) string {
 	if len(s) > pLen-2 {
 		return s[:pLen-2] + ".."
 	} else {
 		return strings.Repeat(string(pad), pLen-len(s)) + s
+	}
+}
+
+func setCurrentRoom(r *Room) {
+	if currentRoom == r {
+		return
+	}
+	currentRoom = r
+	if started {
+		// TODO: Store readline buffer
+		// TODO: Store viewMsgs origin (or bottom)
+		rePrintChan <- "all"
 	}
 }
 
@@ -559,9 +668,6 @@ func layout(g *gocui.Gui) error {
 			}
 		}
 	}
-	//if !initialized {
-	//	initialized = true
-	//}
 	if winNewSize {
 		fmt.Fprintln(debugBuf, "New Size at", time.Now())
 		viewMsgs, _ := g.View("msgs")
@@ -611,8 +717,7 @@ func setAllViews(g *gocui.Gui) error {
 			v.Frame = false
 			v.BgColor = gocui.ColorBlue
 		}
-		// DEBUG: Mockup
-		fmt.Fprintln(v, "\x1b[0;37m[03:14] [@dhole:matrix.org(+)] 2:#debian-reproducible [6] {encrypted}")
+		printStatusLine(v, currentRoom)
 	}
 	viewMsgs, err := g.SetView("msgs", viewRoomsWidth, -1, maxX-viewUsersWidth, viewMsgsHeight)
 	if err != nil {
@@ -623,8 +728,6 @@ func setAllViews(g *gocui.Gui) error {
 			viewMsgs.Frame = false
 			viewMsgs.Wrap = true
 		}
-		//fmt.Fprintln(v, "OLA K ASE")
-		//fmt.Fprintln(v, "OLA K DISE")
 	}
 	if _, err := g.View("debug"); err == nil {
 		g.SetView("debug", maxX/2, maxY/2, maxX, maxY)
@@ -635,18 +738,19 @@ func setAllViews(g *gocui.Gui) error {
 }
 
 func printRooms(v *gocui.View) {
+	v.Clear()
 	pad := 1
-	if len(rs.R) > 15 {
+	if len(rs.R) > 9 {
 		pad = 2
 	}
 	fmt.Fprintf(v, "    People\n\n")
 	for _, r := range rs.PeopleRooms {
-		fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%x", r.Shortcut), r)
+		fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
 	}
 
 	fmt.Fprintf(v, "\n    Groups\n\n")
 	for _, r := range rs.GroupRooms {
-		fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%x", r.Shortcut), r)
+		fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
 	}
 }
 
@@ -660,6 +764,7 @@ func printRoomMessages(v *gocui.View, r *Room) {
 }
 
 func printRoomUsers(v *gocui.View, r *Room) {
+	v.Clear()
 	for _, u := range r.Users.U {
 		power := " "
 		if u.Power > 50 {
@@ -676,10 +781,25 @@ func printRoomUsers(v *gocui.View, r *Room) {
 	}
 }
 
+func printStatusLine(v *gocui.View, r *Room) {
+	v.Clear()
+	u := currentRoom.Users.ById[myUserId]
+	power := ""
+	if u.Power > 50 {
+		power = "@"
+	} else if u.Power > 0 {
+		power = "+"
+	}
+	fmt.Fprintf(v, "\x1b[0;37m[%s] [%s%s] %d.%v [%d]",
+		time.Now().Format("15:04"),
+		power, myUsername,
+		currentRoom.Shortcut, currentRoom, len(currentRoom.Users.U))
+}
+
 func printMessage(v *gocui.View, m *Message, r *Room) {
 	msgWidth, _ := v.Size()
 	t := time.Unix(m.Ts, 0)
-	user := r.Users.ById[m.UserID]
+	user := r.Users.ById[m.UserId]
 	//displayName := ""
 	//if user.Power >= 50 {
 	//	displayName = fmt.Sprintf("@%s", user)
@@ -688,7 +808,7 @@ func printMessage(v *gocui.View, m *Message, r *Room) {
 	//}
 	//fmt.Fprintln(debugBuf, r.Users.U[1])
 	//fmt.Fprintln(debugBuf, r.Users.ById[user.Id])
-	username := StrPad(user.String(), timelineUserWidth-10, ' ')
+	username := strPad(user.String(), timelineUserWidth-10, ' ')
 	//color := NickRGBColors[user.DispNameHash%uint32(len(NickRGBColors))]
 	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
 	color := Nick256Colors[user.DispNameHash%uint32(len(Nick256Colors))]
@@ -747,8 +867,7 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 }
 
 func sendMsg(body string, room *Room) error {
-	msg := Message{"m.text", time.Now().Unix(), MyUserID, body}
-	//currentRoom.Msgs = append(currentRoom.Msgs, msg)
+	msg := Message{"m.text", time.Now().Unix(), myUserId, body}
 	sentMsgsChan <- struct {
 		*Message
 		*Room

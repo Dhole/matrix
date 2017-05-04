@@ -4,7 +4,8 @@ import (
 	"../list"
 	"bytes"
 	"fmt"
-	"github.com/jroimartin/gocui"
+	//"github.com/jroimartin/gocui"
+	"../../gocui"
 	"hash/adler32"
 	//"io"
 	"log"
@@ -12,10 +13,6 @@ import (
 	"strings"
 	"time"
 )
-
-var NickRGBColors []RGBColor = []RGBColor{RGBColor{255, 89, 89}, RGBColor{255, 138, 89}, RGBColor{255, 188, 89}, RGBColor{255, 238, 89}, RGBColor{221, 255, 89}, RGBColor{172, 255, 89}, RGBColor{122, 255, 89}, RGBColor{89, 255, 105}, RGBColor{89, 255, 155}, RGBColor{89, 255, 205}, RGBColor{89, 255, 255}, RGBColor{89, 205, 255}, RGBColor{89, 155, 255}, RGBColor{89, 105, 255}, RGBColor{122, 89, 255}, RGBColor{172, 89, 255}, RGBColor{221, 89, 255}, RGBColor{255, 89, 238}, RGBColor{255, 89, 188}, RGBColor{255, 89, 138}}
-
-var Nick256Colors []byte = []byte{39, 51, 37, 42, 47, 82, 76, 70, 69, 96, 102, 105, 126, 109, 116, 120, 155, 149, 142, 136, 135, 141, 166, 183, 184, 191, 226, 220, 214, 208}
 
 type RGBColor struct {
 	r, g, b byte
@@ -34,6 +31,12 @@ const (
 	MemInvite Membership = iota
 	MemJoin   Membership = iota
 	MemLeave  Membership = iota
+)
+
+const (
+	ConsoleUserId   string = "@trinity:localhost"
+	ConsoleUsername string = "trinity"
+	ConsoleRoomId   string = "!console:localhost"
 )
 
 type User struct {
@@ -61,9 +64,13 @@ type Room struct {
 	Fav      bool
 	Users    Users
 	//Msgs         []Message
-	Msgs         *list.List
-	ViewUsersBuf *string
-	ViewMsgsBuf  *string
+	Msgs *list.List
+	//ViewUsersBuf   *string
+	//ViewMsgsBuf    *string
+	ViewMsgsOriginY     int
+	ScrollBottom        bool
+	ViewReadlineBuf     string
+	ViewReadlineCursorX int
 }
 
 type Rooms struct {
@@ -73,11 +80,21 @@ type Rooms struct {
 	ByShortcut  map[int]*Room
 	PeopleRooms []*Room
 	GroupRooms  []*Room
+	ConsoleRoom *Room
+}
+
+type MessageRoom struct {
+	Message *Message
+	Room    *Room
 }
 
 type Words []string
 
 // CONFIG
+
+var nickRGBColors []RGBColor = []RGBColor{RGBColor{255, 89, 89}, RGBColor{255, 138, 89}, RGBColor{255, 188, 89}, RGBColor{255, 238, 89}, RGBColor{221, 255, 89}, RGBColor{172, 255, 89}, RGBColor{122, 255, 89}, RGBColor{89, 255, 105}, RGBColor{89, 255, 155}, RGBColor{89, 255, 205}, RGBColor{89, 255, 255}, RGBColor{89, 205, 255}, RGBColor{89, 155, 255}, RGBColor{89, 105, 255}, RGBColor{122, 89, 255}, RGBColor{172, 89, 255}, RGBColor{221, 89, 255}, RGBColor{255, 89, 238}, RGBColor{255, 89, 188}, RGBColor{255, 89, 138}}
+
+var nick256Colors []byte = []byte{39, 51, 37, 42, 47, 82, 76, 70, 69, 96, 102, 105, 126, 109, 116, 120, 155, 149, 142, 136, 135, 141, 166, 183, 184, 191, 226, 220, 214, 208}
 
 var viewRoomsWidth int = 24
 var viewUsersWidth int = 22
@@ -94,20 +111,19 @@ var displayNamesId = false
 
 // END CONFIG
 
-//var readline_max_h = 8
-
 // GLOBALS
 
 var myUsername string
 var myUserId string
 
 var currentRoom *Room
+var lastRoom *Room
 var rs Rooms
 
 var debugBuf *bytes.Buffer
 
-var ReadLineEditor gocui.Editor = gocui.EditorFunc(readLine)
-var ReadMultiLineEditor gocui.Editor = gocui.EditorFunc(readMultiLine)
+var readLineEditor gocui.Editor = gocui.EditorFunc(readLine)
+var readMultiLineEditor gocui.Editor = gocui.EditorFunc(readMultiLine)
 
 var readlineMultiline bool
 var readlineBuf []Words
@@ -115,13 +131,14 @@ var readlineIdx int
 
 var viewMsgsHeight int
 var viewMsgsLines int
+var scrollBottom bool
 
 // eventLoop channels
-var sentMsgsChan chan struct {
-	*Message
-	*Room
-}
+var sentMsgsChan chan MessageRoom
+var recvMsgsChan chan MessageRoom
 var rePrintChan chan string
+var switchRoomChan chan bool
+var cmdChan chan []string
 
 var started bool
 
@@ -225,6 +242,8 @@ func shortcuts(key gocui.Key, ch rune, mod gocui.Modifier) bool {
 		}
 	} else {
 		switch {
+		case mod == gocui.ModAlt && ch == '0':
+			roomShortcut = 0
 		case mod == gocui.ModAlt && ch == '1':
 			roomShortcut = 1
 		case mod == gocui.ModAlt && ch == '2':
@@ -252,7 +271,7 @@ func shortcuts(key gocui.Key, ch rune, mod gocui.Modifier) bool {
 	if roomShortcut != -1 {
 		r, ok := rs.ByShortcut[roomShortcut]
 		if ok {
-			setCurrentRoom(r)
+			setCurrentRoom(r, true)
 		}
 	}
 	return true
@@ -374,7 +393,8 @@ func (rs *Rooms) UpdateShortcuts() {
 	rs.PeopleRooms = make([]*Room, 0)
 	rs.GroupRooms = make([]*Room, 0)
 	count := 0
-	for _, r := range rs.R {
+	rs.ByShortcut[0] = rs.ConsoleRoom
+	for _, r := range rs.R[1:] {
 		if len(r.Users.U) == 2 {
 			count++
 			r.Shortcut = count
@@ -382,7 +402,7 @@ func (rs *Rooms) UpdateShortcuts() {
 			rs.ByShortcut[r.Shortcut] = r
 		}
 	}
-	for _, r := range rs.R {
+	for _, r := range rs.R[1:] {
 		if len(r.Users.U) != 2 {
 			count++
 			r.Shortcut = count
@@ -447,10 +467,7 @@ func AddMessage(roomId, msgType string, ts int64, userId, body string) error {
 	}
 	m := Message{msgType, ts, userId, body}
 	if started {
-		sentMsgsChan <- struct {
-			*Message
-			*Room
-		}{&m, r}
+		recvMsgsChan <- MessageRoom{&m, r}
 	} else {
 		r.Msgs.PushBack(m)
 	}
@@ -464,12 +481,12 @@ func initReadline() {
 	readlineMultiline = false
 }
 
-func scrollViewMsgs(g *gocui.Gui, v *gocui.View, l int) error {
+func scrollViewMsgs(g *gocui.Gui, l int) error {
 	viewMsgs, err := g.View("msgs")
 	if err != nil {
 		return err
 	}
-	x, y := viewMsgs.Origin()
+	_, y := viewMsgs.Origin()
 	newY := 0
 	if l < 0 {
 		newY = max(y+l, 0)
@@ -478,71 +495,159 @@ func scrollViewMsgs(g *gocui.Gui, v *gocui.View, l int) error {
 		newY = min(y+l, viewMsgsLines-viewMsgsHeight)
 		newY = max(newY, 0)
 	}
-	viewMsgs.SetOrigin(x, newY)
+	viewMsgs.SetOrigin(0, newY)
+	if newY >= viewMsgsLines-viewMsgsHeight {
+		scrollBottom = true
+	} else {
+		scrollBottom = false
+	}
 	return nil
+}
+
+func scrollViewMsgsBottom(g *gocui.Gui) error {
+	return scrollViewMsgs(g, viewMsgsLines-viewMsgsHeight)
+}
+
+func appendRoomMsg(g *gocui.Gui, r *Room, m *Message) {
+	r.Msgs.PushBack(*m)
+	g.Execute(func(g *gocui.Gui) error {
+		viewMsgs, _ := g.View("msgs")
+		if r == currentRoom {
+			printMessage(viewMsgs, m, r)
+			if scrollBottom {
+				scrollViewMsgsBottom(g)
+			}
+		}
+		return nil
+	})
+}
+
+func printView(g *gocui.Gui, view string) {
+	views := []string{view}
+	if view == "all" {
+		views = []string{"rooms", "msgs", "users",
+			"readline", "statusline"}
+	}
+	for _, view := range views {
+		switch view {
+		case "rooms":
+			v, _ := g.View(view)
+			printRooms(v)
+		case "msgs":
+			v, _ := g.View(view)
+			printRoomMessages(v, currentRoom)
+		case "users":
+			v, _ := g.View(view)
+			printRoomUsers(v, currentRoom)
+		case "readline":
+			// TODO
+			//v, _ := g.View(view)
+			//printStatusLine(v, currentRoom)
+		case "statusline":
+			v, _ := g.View(view)
+			printStatusLine(v, currentRoom)
+		}
+	}
 }
 
 func eventLoop(g *gocui.Gui) {
 	for {
 		select {
 		case mr := <-sentMsgsChan:
-			mr.Room.Msgs.PushBack(*mr.Message)
+			var r *Room
+			if len(mr.Message.Body) >= 1 && mr.Message.Body[0] == '/' {
+				r = rs.ConsoleRoom
+			} else {
+				r = mr.Room
+			}
+			appendRoomMsg(g, r, mr.Message)
+			if r == rs.ConsoleRoom {
+				body := strings.TrimPrefix(mr.Message.Body, "/")
+				args := strings.Fields(body)
+				//fmt.Fprint(debugBuf, args)
+				cmdChan <- args
+			}
+		case mr := <-recvMsgsChan:
+			appendRoomMsg(g, mr.Room, mr.Message)
+		case view := <-rePrintChan:
+			g.Execute(func(g *gocui.Gui) error {
+				printView(g, view)
+				return nil
+			})
+		case <-switchRoomChan:
 			g.Execute(func(g *gocui.Gui) error {
 				viewMsgs, _ := g.View("msgs")
 				_, y := viewMsgs.Origin()
-				scrollBottom := false
-				if y == viewMsgsLines-viewMsgsHeight {
-					scrollBottom = true
-				}
-				printMessage(viewMsgs, mr.Message, mr.Room)
+				lastRoom.ViewMsgsOriginY = y
+				viewMsgs.SetOrigin(0, currentRoom.ViewMsgsOriginY)
+
+				lastRoom.ScrollBottom = scrollBottom
+				scrollBottom = currentRoom.ScrollBottom
+
+				viewReadline, _ := g.View("readline")
+				x, _ := viewReadline.Cursor()
+				lastRoom.ViewReadlineBuf = viewReadline.Buffer()
+				lastRoom.ViewReadlineCursorX = x
+				viewReadline.Clear()
+				viewReadline.SetOrigin(0, 0)
+				viewReadline.Write([]byte(currentRoom.ViewReadlineBuf))
+				viewReadline.SetCursor(currentRoom.ViewReadlineCursorX, 0)
+
+				printView(g, "all")
+
 				if scrollBottom {
-					scrollViewMsgs(g, viewMsgs, viewMsgsLines-viewMsgsHeight)
+					scrollViewMsgsBottom(g)
 				}
 				return nil
-			})
-		case view := <-rePrintChan:
-			g.Execute(func(g *gocui.Gui) error {
-				views := []string{view}
-				if view == "all" {
-					views = []string{"rooms", "msgs", "users",
-						"readline", "statusline"}
-				}
-				for _, view := range views {
-					switch view {
-					case "rooms":
-						v, _ := g.View(view)
-						printRooms(v)
-					case "msgs":
-						v, _ := g.View(view)
-						printRoomMessages(v, currentRoom)
-					case "users":
-						v, _ := g.View(view)
-						printRoomUsers(v, currentRoom)
-					case "readline":
-						// TODO
-						//v, _ := g.View(view)
-						//printStatusLine(v, currentRoom)
-					case "statusline":
-						v, _ := g.View(view)
-						printStatusLine(v, currentRoom)
-					}
-				}
-				return nil
+
 			})
 		}
 
 	}
 }
 
-func Init() {
-	rs = NewRooms()
+func cmdLoop(g *gocui.Gui) {
+	for {
+		args := <-cmdChan
+		if len(args) < 1 {
+			continue
+		}
+		switch args[0] {
+		case "quit":
+			g.Execute(quit)
+		default:
+			consoleReply(fmt.Sprintf("Unknown command: %s", args[0]))
+		}
+	}
 }
 
-func Start() {
+func consoleReply(rep string) {
+	recvMsgsChan <- MessageRoom{
+		&Message{"m.text", time.Now().Unix(), ConsoleUserId, rep},
+		rs.ConsoleRoom}
+}
+
+func Init() {
+	rs = NewRooms()
+	AddRoom(ConsoleRoomId, "Console", "")
+	AddUser(ConsoleRoomId, ConsoleUserId, ConsoleUsername, 100, MemJoin)
+	rs.ConsoleRoom = rs.ById[ConsoleRoomId]
+	if rs.ConsoleRoom != rs.R[0] {
+		panic("ConsoleRoom is not rs.R[0]")
+	}
+	rs.ConsoleRoom.Shortcut = 0
+	currentRoom = rs.ConsoleRoom
+	lastRoom = currentRoom
+	//currentRoom = rs.ConsoleRoom
+}
+
+func Start() error {
 	debugBuf = bytes.NewBufferString("")
-	// DEBUG START
-	setCurrentRoom(rs.R[0])
-	// DEBUG END
+	lastRoom = currentRoom
+	if myUserId == "" {
+		return fmt.Errorf("UserId not set")
+	}
+	AddUser(ConsoleRoomId, myUserId, myUsername, 0, MemJoin)
 	//initRooms()
 	//initMsgs()
 	initReadline()
@@ -557,7 +662,9 @@ func Start() {
 	g.Cursor = true
 
 	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone,
-		quit); err != nil {
+		func(g *gocui.Gui, v *gocui.View) error {
+			return quit(g)
+		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyF7, gocui.ModNone,
@@ -570,25 +677,25 @@ func Start() {
 	}
 	if err := g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, v, -1)
+			return scrollViewMsgs(g, -1)
 		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, v, 1)
+			return scrollViewMsgs(g, 1)
 		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyCtrlU, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, v, -viewMsgsHeight/2)
+			return scrollViewMsgs(g, -viewMsgsHeight/2)
 		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyCtrlD, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, v, viewMsgsHeight/2)
+			return scrollViewMsgs(g, viewMsgsHeight/2)
 		}); err != nil {
 		log.Panicln(err)
 	}
@@ -598,13 +705,14 @@ func Start() {
 	// PgUp / PgDn: scroll text in current buffer
 
 	// Initialize eventLoop channels
-	sentMsgsChan = make(chan struct {
-		*Message
-		*Room
-	}, 16)
+	sentMsgsChan = make(chan MessageRoom, 16)
+	recvMsgsChan = make(chan MessageRoom, 16)
 	rePrintChan = make(chan string, 16)
+	switchRoomChan = make(chan bool, 16)
+	cmdChan = make(chan []string, 16)
 
 	go eventLoop(g)
+	go cmdLoop(g)
 
 	go func() {
 		time.Sleep(time.Duration(30) * time.Second)
@@ -612,11 +720,12 @@ func Start() {
 	}()
 	started = true
 	if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
-		log.Panicln(err)
+		return err
 	}
+	return nil
 }
 
-func strPad(s string, pLen int, pad rune) string {
+func strPadLeft(s string, pLen int, pad rune) string {
 	if len(s) > pLen-2 {
 		return s[:pLen-2] + ".."
 	} else {
@@ -624,15 +733,27 @@ func strPad(s string, pLen int, pad rune) string {
 	}
 }
 
-func setCurrentRoom(r *Room) {
-	if currentRoom == r {
+func strPadRight(s string, pLen int, pad rune) string {
+	if len(s) > pLen-2 {
+		return s[:pLen-2] + ".."
+	} else {
+		return s + strings.Repeat(string(pad), pLen-len(s))
+	}
+}
+func setCurrentRoom(r *Room, toggle bool) {
+	if toggle {
+		if currentRoom == r {
+			r = lastRoom
+		}
+	} else if currentRoom == r {
 		return
 	}
+	lastRoom = currentRoom
 	currentRoom = r
 	if started {
 		// TODO: Store readline buffer
 		// TODO: Store viewMsgs origin (or bottom)
-		rePrintChan <- "all"
+		switchRoomChan <- true
 	}
 }
 
@@ -705,7 +826,7 @@ func setAllViews(g *gocui.Gui) error {
 		if err == gocui.ErrUnknownView {
 			v.Frame = false
 			v.Editable = true
-			v.Editor = ReadLineEditor
+			v.Editor = readLineEditor
 		}
 	}
 	if v, err := g.SetView("statusline", viewRoomsWidth, maxY-2-readlineHeight,
@@ -743,15 +864,38 @@ func printRooms(v *gocui.View) {
 	if len(rs.R) > 9 {
 		pad = 2
 	}
-	fmt.Fprintf(v, "    People\n\n")
-	for _, r := range rs.PeopleRooms {
-		fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
+	roomSets := [][]*Room{[]*Room{rs.ConsoleRoom}, rs.PeopleRooms, rs.GroupRooms}
+	for i, roomSet := range roomSets {
+		switch i {
+		case 1:
+			fmt.Fprintf(v, "\n    People\n\n")
+		case 2:
+			fmt.Fprintf(v, "\n    Groups\n\n")
+		}
+		for _, r := range roomSet {
+			highStart := ""
+			highEnd := ""
+			if r == currentRoom {
+				highStart = "\x1b[48;5;40m\x1b[38;5;0m"
+				highEnd = "\x1b[0;0m"
+			}
+			fmt.Fprintf(v, "%s%*s.%s%s\n", highStart, pad,
+				fmt.Sprintf("%d", r.Shortcut),
+				strPadRight(r.String(), viewRoomsWidth-pad, ' '),
+				highEnd)
+		}
 	}
 
-	fmt.Fprintf(v, "\n    Groups\n\n")
-	for _, r := range rs.GroupRooms {
-		fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
-	}
+	//fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", rs.ConsoleRoom.Shortcut), rs.ConsoleRoom)
+	//fmt.Fprintf(v, "\n    People\n\n")
+	//for _, r := range rs.PeopleRooms {
+	//	fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
+	//}
+
+	//fmt.Fprintf(v, "\n    Groups\n\n")
+	//for _, r := range rs.GroupRooms {
+	//	fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
+	//}
 }
 
 func printRoomMessages(v *gocui.View, r *Room) {
@@ -774,7 +918,7 @@ func printRoomUsers(v *gocui.View, r *Room) {
 			// Colored '+'
 			power = "\x1b[38;5;172m+\x1b[0;0m"
 		}
-		//color := Nick256Colors[u.DispNameHash%uint32(len(Nick256Colors))]
+		//color := nick256Colors[u.DispNameHash%uint32(len(nick256Colors))]
 		//username := fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, u.DispName)
 		//fmt.Fprintf(v, "%s%s\n", power, username)
 		fmt.Fprintf(v, "%s%s\n", power, u)
@@ -808,10 +952,10 @@ func printMessage(v *gocui.View, m *Message, r *Room) {
 	//}
 	//fmt.Fprintln(debugBuf, r.Users.U[1])
 	//fmt.Fprintln(debugBuf, r.Users.ById[user.Id])
-	username := strPad(user.String(), timelineUserWidth-10, ' ')
-	//color := NickRGBColors[user.DispNameHash%uint32(len(NickRGBColors))]
+	username := strPadLeft(user.String(), timelineUserWidth-10, ' ')
+	//color := nickRGBColors[user.DispNameHash%uint32(len(nickRGBColors))]
 	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
-	color := Nick256Colors[user.DispNameHash%uint32(len(Nick256Colors))]
+	color := nick256Colors[user.DispNameHash%uint32(len(nick256Colors))]
 	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
 	//username = fmt.Sprintf("\x1b[38;2;255;0;0m%s\x1b[0;0m", "HOLA")
 	fmt.Fprint(v, t.Format("15:04:05"), " ", username, " ")
@@ -840,7 +984,7 @@ func printMessage(v *gocui.View, m *Message, r *Room) {
 	viewMsgsLines += lines
 }
 
-func quit(g *gocui.Gui, v *gocui.View) error {
+func quit(g *gocui.Gui) error {
 	return gocui.ErrQuit
 }
 
@@ -868,10 +1012,7 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 
 func sendMsg(body string, room *Room) error {
 	msg := Message{"m.text", time.Now().Unix(), myUserId, body}
-	sentMsgsChan <- struct {
-		*Message
-		*Room
-	}{&msg, room}
+	sentMsgsChan <- MessageRoom{&msg, room}
 	return nil
 }
 
@@ -884,12 +1025,12 @@ func keyReadmultiLineToggle(g *gocui.Gui, v *gocui.View) error {
 		readlineMultiline = false
 		readlineHeight = 1
 		setViewMsgsHeight(g)
-		viewReadline.Editor = ReadLineEditor
+		viewReadline.Editor = readLineEditor
 	} else {
 		readlineMultiline = true
 		readlineHeight = 5
 		setViewMsgsHeight(g)
-		viewReadline.Editor = ReadMultiLineEditor
+		viewReadline.Editor = readMultiLineEditor
 	}
 	return nil
 }

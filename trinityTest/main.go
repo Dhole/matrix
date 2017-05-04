@@ -3,6 +3,7 @@ package main
 import (
 	ui "../trinity"
 	"fmt"
+	"log"
 )
 
 var myUsername = "dhole"
@@ -98,5 +99,7 @@ func main() {
 	initRooms()
 	initMsgs()
 
-	ui.Start()
+	if err := ui.Start(); err != nil {
+		log.Fatal(err)
+	}
 }

@@ -21,7 +21,7 @@ type RGBColor struct {
 type Message struct {
 	MsgType string
 	Ts      int64
-	UserId  string
+	UserID  string
 	Body    string
 }
 
@@ -34,13 +34,13 @@ const (
 )
 
 const (
-	ConsoleUserId   string = "@trinity:localhost"
-	ConsoleUsername string = "trinity"
-	ConsoleRoomId   string = "!console:localhost"
+	ConsoleUserID      string = "@trinity:localhost"
+	ConsoleDisplayName string = "trinity"
+	ConsoleRoomID      string = "!console:localhost"
 )
 
 type User struct {
-	Id           string
+	ID           string
 	Name         string
 	DispName     string
 	DispNameHash uint32
@@ -50,19 +50,20 @@ type User struct {
 
 type Users struct {
 	U      []*User
-	ById   map[string]*User
+	ByID   map[string]*User
 	ByName map[string][]*User
 }
 
 type Room struct {
-	Id       string
-	Name     string
-	DispName string
-	Alias    string
-	Topic    string
-	Shortcut int
-	Fav      bool
-	Users    Users
+	ID           string
+	Name         string
+	DispName     string
+	CanonAlias   string
+	Topic        string
+	Shortcut     int
+	Fav          bool
+	Users        Users
+	NewUserBatch bool
 	//Msgs         []Message
 	Msgs *list.List
 	//ViewUsersBuf   *string
@@ -75,7 +76,7 @@ type Room struct {
 
 type Rooms struct {
 	R           []*Room
-	ById        map[string]*Room
+	ByID        map[string]*Room
 	ByName      map[string][]*Room
 	ByShortcut  map[int]*Room
 	PeopleRooms []*Room
@@ -86,6 +87,11 @@ type Rooms struct {
 type MessageRoom struct {
 	Message *Message
 	Room    *Room
+}
+
+type Args struct {
+	Room *Room
+	Args []string
 }
 
 type Words []string
@@ -107,14 +113,20 @@ var windowHeight int = -1
 
 var readlineHeight int = 1
 
-var displayNamesId = false
+var displayNamesID = false
+
+// Callbacks
+var callSendText func(roomID, body string)
+var callJoinRoom func(roomIDorAlias string)
+var callLeaveRoom func(roomID string)
+var callQuit func()
 
 // END CONFIG
 
 // GLOBALS
 
-var myUsername string
-var myUserId string
+var myDisplayName string
+var myUserID string
 
 var currentRoom *Room
 var lastRoom *Room
@@ -127,7 +139,7 @@ var readMultiLineEditor gocui.Editor = gocui.EditorFunc(readMultiLine)
 
 var readlineMultiline bool
 var readlineBuf []Words
-var readlineIdx int
+var readlineIDx int
 
 var viewMsgsHeight int
 var viewMsgsLines int
@@ -138,7 +150,7 @@ var sentMsgsChan chan MessageRoom
 var recvMsgsChan chan MessageRoom
 var rePrintChan chan string
 var switchRoomChan chan bool
-var cmdChan chan []string
+var cmdChan chan Args
 
 var started bool
 
@@ -153,54 +165,56 @@ func (r *Room) UpdateDispName() {
 		r.DispName = r.Name
 		return
 	}
-	if r.Alias != "" {
-		r.DispName = r.Alias
+	if r.CanonAlias != "" {
+		r.DispName = r.CanonAlias
 		return
 	}
-	roomUserIds := make([]string, 0)
-	for k := range r.Users.ById {
-		if k == myUserId {
+	roomUserIDs := make([]string, 0)
+	for k := range r.Users.ByID {
+		if k == myUserID {
 			continue
 		}
-		roomUserIds = append(roomUserIds, k)
+		roomUserIDs = append(roomUserIDs, k)
 	}
-	if len(roomUserIds) == 1 {
-		r.DispName = r.Users.ById[roomUserIds[0]].String()
+	if len(roomUserIDs) == 1 {
+		r.DispName = r.Users.ByID[roomUserIDs[0]].String()
 		return
 	}
-	sort.Strings(roomUserIds)
-	if len(roomUserIds) == 2 {
-		r.DispName = fmt.Sprint(r.Users.ById[roomUserIds[0]], "and",
-			r.Users.ById[roomUserIds[1]])
+	sort.Strings(roomUserIDs)
+	if len(roomUserIDs) == 2 {
+		r.DispName = fmt.Sprintf("%s and %s", r.Users.ByID[roomUserIDs[0]],
+			r.Users.ByID[roomUserIDs[1]])
 		return
 	}
-	if len(roomUserIds) > 2 {
-		r.DispName = fmt.Sprint(r.Users.ById[roomUserIds[0]], "and",
-			len(roomUserIds)-1, "others")
+	if len(roomUserIDs) > 2 {
+		r.DispName = fmt.Sprintf("%s and %d others", r.Users.ByID[roomUserIDs[0]],
+			len(roomUserIDs)-1)
 		return
 	}
 	r.DispName = "Emtpy room"
 }
 
 func (u *User) String() string {
-	if displayNamesId {
-		return u.Id
+	if displayNamesID {
+		return u.ID
 	} else {
 		return u.DispName
 	}
 }
 
-func (u *User) UpdateDispName(r *Room) {
-	defer r.UpdateDispName()
+func (u *User) UpdateDispName(r *Room, roomUpdateDispName bool) {
+	if roomUpdateDispName {
+		defer r.UpdateDispName()
+	}
 	defer func() {
 		u.DispNameHash = adler32.Checksum([]byte(u.DispName))
 	}()
 	if u.Name == "" {
-		u.DispName = u.Id
+		u.DispName = u.ID
 		return
 	}
 	if len(r.Users.ByName[u.Name]) > 1 {
-		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.Id)
+		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.ID)
 		return
 	}
 	u.DispName = u.Name
@@ -288,10 +302,26 @@ func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 		v.EditWrite(' ')
 	case key == gocui.KeyBackspace || key == gocui.KeyBackspace2:
 		v.EditDelete(true)
-	//case key == gocui.KeyCtrlU:
-	//	v.Clear()
-	//	v.SetOrigin(0, 0)
-	//	v.SetCursor(0, 0)
+	case key == gocui.KeyDelete:
+		v.EditDelete(false)
+	case key == gocui.KeyArrowLeft:
+		v.MoveCursor(-1, 0, false)
+	case key == gocui.KeyArrowRight:
+		v.MoveCursor(1, 0, false)
+		_, y := v.Origin()
+		if y > 0 {
+			v.MoveCursor(-1, 0, false)
+		}
+	case key == gocui.KeyCtrlA || key == gocui.KeyHome:
+		v.SetOrigin(0, 0)
+		v.SetCursor(0, 0)
+	case key == gocui.KeyCtrlE || key == gocui.KeyEnd:
+		v.MoveCursor(0, 1, false)
+		v.MoveCursor(-1, 0, false)
+	case key == gocui.KeyCtrlU:
+		v.Clear()
+		v.SetOrigin(0, 0)
+		v.SetCursor(0, 0)
 	case key == gocui.KeyEnter:
 		body := v.Buffer()
 		if len(body) == 0 {
@@ -301,7 +331,9 @@ func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 		v.Clear()
 		v.SetOrigin(0, 0)
 		v.SetCursor(0, 0)
-		sendMsg(body, currentRoom)
+		if len(body) != 0 {
+			sendMsg(body, currentRoom)
+		}
 	}
 }
 
@@ -312,14 +344,14 @@ func readMultiLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 
 func NewUsers() (us Users) {
 	us.U = make([]*User, 0)
-	us.ById = make(map[string]*User, 0)
+	us.ByID = make(map[string]*User, 0)
 	us.ByName = make(map[string][]*User, 0)
 	return us
 }
 
 func (us *Users) Add(id, name string, power int, mem Membership) {
 	u := &User{
-		Id:           id,
+		ID:           id,
 		Name:         name,
 		DispName:     "",
 		DispNameHash: 0,
@@ -327,7 +359,7 @@ func (us *Users) Add(id, name string, power int, mem Membership) {
 		Mem:          mem,
 	}
 	us.U = append(us.U, u)
-	us.ById[u.Id] = u
+	us.ByID[u.ID] = u
 	if u.Name != "" {
 		if us.ByName[u.Name] == nil {
 			us.ByName[u.Name] = make([]*User, 0)
@@ -335,7 +367,7 @@ func (us *Users) Add(id, name string, power int, mem Membership) {
 		us.ByName[u.Name] = append(us.ByName[u.Name], u)
 	}
 	//fmt.Fprintf(debugBuf, "us:      %p\n", &us.U[len(us.U)-1])
-	//fmt.Fprintf(debugBuf, "us.ById: %p\n", us.ById[u.Id])
+	//fmt.Fprintf(debugBuf, "us.ByID: %p\n", us.ByID[u.ID])
 	//fmt.Fprintf(debugBuf, "_u:      %p\n", _u)
 }
 
@@ -349,10 +381,11 @@ func (us *Users) SetUserName(u User, name string) {
 	// TODO: What if there are two users with the same name?
 }
 
-func NewRoom(id, name, topic string) (r *Room) {
+func NewRoom(id, name, canonAlias, topic string) (r *Room) {
 	r = &Room{}
-	r.Id = id
+	r.ID = id
 	r.Name = name
+	r.CanonAlias = canonAlias
 	r.Topic = topic
 	r.Users = NewUsers()
 	//r.Msgs = make([]Message, 0)
@@ -362,14 +395,14 @@ func NewRoom(id, name, topic string) (r *Room) {
 
 func NewRooms() (rs Rooms) {
 	rs.R = make([]*Room, 0)
-	rs.ById = make(map[string]*Room, 0)
+	rs.ByID = make(map[string]*Room, 0)
 	rs.ByName = make(map[string][]*Room, 0)
 	return rs
 }
 
 func (rs *Rooms) Add(r *Room) {
 	rs.R = append(rs.R, r)
-	rs.ById[r.Id] = r
+	rs.ByID[r.ID] = r
 	if r.Name != "" {
 		if rs.ByName[r.Name] == nil {
 			rs.ByName[r.Name] = make([]*Room, 0)
@@ -378,9 +411,19 @@ func (rs *Rooms) Add(r *Room) {
 	}
 }
 
-func (rs *Rooms) Del(r Room) {
-	// TODO
-	// TODO: What if there are two rooms with the same name?
+func (rs *Rooms) Del(r *Room) {
+	delete(rs.ByID, r.ID)
+	if r.Name != "" {
+		delete(rs.ByName, r.Name)
+	}
+	newR := make([]*Room, 0, len(rs.R)-1)
+	for _, room := range rs.R {
+		if room == r {
+			continue
+		}
+		newR = append(newR, room)
+	}
+	rs.R = newR
 }
 
 func (rs *Rooms) SetRoomName(r Room, name string) {
@@ -412,39 +455,66 @@ func (rs *Rooms) UpdateShortcuts() {
 	}
 }
 
-func SetMyUsername(username string) {
-	myUsername = username
+func SetMyDisplayName(username string) {
+	myDisplayName = username
 }
 
-func SetMyUserId(userId string) {
-	myUserId = userId
+func SetMyUserID(userID string) {
+	myUserID = userID
 }
 
-func AddRoom(roomId, name, topic string) error {
-	_, ok := rs.ById[roomId]
+func SetCallSendText(call func(roomID, body string)) {
+	callSendText = call
+}
+
+func SetCallJoinRoom(call func(roomIDorAlias string)) {
+	callJoinRoom = call
+}
+
+func SetCallLeaveRoom(call func(roomID string)) {
+	callLeaveRoom = call
+}
+
+func SetCallQuit(call func()) {
+	callQuit = call
+}
+
+func AddRoom(roomID, name, canonAlias, topic string) error {
+	_, ok := rs.ByID[roomID]
 	if ok {
-		return fmt.Errorf("Room %v already exists", roomId)
+		return fmt.Errorf("Room %v already exists", roomID)
 	}
-	r := NewRoom(roomId, name, topic)
+	r := NewRoom(roomID, name, canonAlias, topic)
 	r.UpdateDispName()
 	rs.Add(r)
 	rs.UpdateShortcuts()
 	if started {
-		if r == currentRoom {
-			rePrintChan <- "rooms"
-		}
+		rePrintChan <- "rooms"
 	}
 	return nil
 }
 
-func AddUser(roomId, userId, username string, power int, membership Membership) error {
-	r, ok := rs.ById[roomId]
+func DelRoom(roomID string) (string, error) {
+	r, ok := rs.ByID[roomID]
 	if !ok {
-		return fmt.Errorf("Room %v doesn't exist", roomId)
+		return "", fmt.Errorf("Room %v doesn't exists", roomID)
 	}
-	r.Users.Add(userId, username, power, membership)
+	rs.Del(r)
+	rs.UpdateShortcuts()
+	if started {
+		rePrintChan <- "rooms"
+	}
+	return r.Name, nil
+}
+
+func AddUser(roomID, userID, username string, power int, membership Membership) error {
+	r, ok := rs.ByID[roomID]
+	if !ok {
+		return fmt.Errorf("Room %v doesn't exist", roomID)
+	}
+	r.Users.Add(userID, username, power, membership)
 	for _, u := range r.Users.U {
-		u.UpdateDispName(r)
+		u.UpdateDispName(r, true)
 	}
 	r.UpdateDispName()
 	if started {
@@ -452,20 +522,64 @@ func AddUser(roomId, userId, username string, power int, membership Membership) 
 			rePrintChan <- "users"
 			rePrintChan <- "statusline"
 		}
+		if len(r.Users.U) <= 3 {
+			rs.UpdateShortcuts()
+			rePrintChan <- "rooms"
+		}
 	}
 	return nil
 }
 
-func AddMessage(roomId, msgType string, ts int64, userId, body string) error {
-	r, ok := rs.ById[roomId]
+func AddUserBatch(roomID, userID, username string, power int, membership Membership) error {
+	r, ok := rs.ByID[roomID]
 	if !ok {
-		return fmt.Errorf("Room %v doesn't exist", roomId)
+		return fmt.Errorf("Room %v doesn't exist", roomID)
 	}
-	_, ok = r.Users.ById[userId]
+	r.Users.Add(userID, username, power, membership)
+	r.NewUserBatch = true
+	return nil
+}
+
+func AddUserBatchFinish() {
+	updatedCurrentRoom := false
+	for _, r := range rs.R {
+		if !r.NewUserBatch {
+			continue
+		}
+		for _, u := range r.Users.U {
+			u.UpdateDispName(r, false)
+		}
+		r.UpdateDispName()
+		r.NewUserBatch = false
+		if r == currentRoom {
+			updatedCurrentRoom = true
+		}
+	}
+	if started {
+		rs.UpdateShortcuts()
+		rePrintChan <- "rooms"
+		if updatedCurrentRoom {
+			rePrintChan <- "users"
+			rePrintChan <- "msgs"
+			rePrintChan <- "statusline"
+		}
+	}
+}
+
+func AddConsoleMessage(body string) {
+	AddMessage(ConsoleRoomID, "m.text", time.Now().Unix(), ConsoleUserID, body)
+}
+
+func AddMessage(roomID, msgType string, ts int64, userID, body string) error {
+	r, ok := rs.ByID[roomID]
 	if !ok {
-		return fmt.Errorf("User %v doesn't exist in room %v", userId, roomId)
+		return fmt.Errorf("Room %v doesn't exist", roomID)
 	}
-	m := Message{msgType, ts, userId, body}
+	_, ok = r.Users.ByID[userID]
+	if !ok {
+		return fmt.Errorf("User %v doesn't exist in room %v", userID, roomID)
+	}
+	m := Message{msgType, ts, userID, body}
 	if started {
 		recvMsgsChan <- MessageRoom{&m, r}
 	} else {
@@ -475,9 +589,20 @@ func AddMessage(roomId, msgType string, ts int64, userId, body string) error {
 	return nil
 }
 
+func Debugln(args ...interface{}) {
+	fmt.Fprintln(debugBuf, args...)
+	rePrintChan <- "debug"
+}
+
+func Debugf(format string, args ...interface{}) {
+	fmt.Fprintf(debugBuf, format, args...)
+	fmt.Fprint(debugBuf, "\n")
+	rePrintChan <- "debug"
+}
+
 func initReadline() {
 	readlineBuf = make([]Words, 1)
-	readlineIdx = 0
+	readlineIDx = 0
 	readlineMultiline = false
 }
 
@@ -546,6 +671,12 @@ func printView(g *gocui.Gui, view string) {
 		case "statusline":
 			v, _ := g.View(view)
 			printStatusLine(v, currentRoom)
+		case "debug":
+			v, err := g.View(view)
+			if err == nil {
+				v.Clear()
+				fmt.Fprint(v, debugBuf)
+			}
 		}
 	}
 }
@@ -555,17 +686,22 @@ func eventLoop(g *gocui.Gui) {
 		select {
 		case mr := <-sentMsgsChan:
 			var r *Room
-			if len(mr.Message.Body) >= 1 && mr.Message.Body[0] == '/' {
+			if mr.Message.Body[0] == '/' {
 				r = rs.ConsoleRoom
 			} else {
 				r = mr.Room
 			}
-			appendRoomMsg(g, r, mr.Message)
 			if r == rs.ConsoleRoom {
+				appendRoomMsg(g, r, mr.Message)
 				body := strings.TrimPrefix(mr.Message.Body, "/")
 				args := strings.Fields(body)
-				//fmt.Fprint(debugBuf, args)
-				cmdChan <- args
+				if len(args) < 1 {
+					continue
+				}
+				cmdChan <- Args{mr.Room, args}
+			} else {
+				// TODO: Show the message temorarily until we
+				// get echoed by the server
 			}
 		case mr := <-recvMsgsChan:
 			appendRoomMsg(g, mr.Room, mr.Message)
@@ -606,32 +742,77 @@ func eventLoop(g *gocui.Gui) {
 	}
 }
 
+//func joinRoom(roomIDorAlias string) {
+//	roomID, err := callJoinRoom(roomIDorAlias); err != nil {
+//		AddConsoleMessage(fmt.Sprint("join:", err))
+//	} else {
+//		AddConsoleMessage(fmt.Sprintf("Joined room (%s) %s: %s",
+//			roomID, resp["name"], resp["topic"]))
+//	}
+//}
+
+//func leaveRoom(roomID string) {
+//	r := rs.ByID[roomID]
+//	if r == nil {
+//		return
+//	}
+//	roomName := r.Name
+//	if err := callLeaveRoom(roomID); err != nil {
+//		AddConsoleMessage(fmt.Sprint("leave:", err))
+//	} else {
+//		AddConsoleMessage(fmt.Sprintf("Left room (%s) %s",
+//			roomID, roomName))
+//	}
+//}
+
+func roomIDCmd(args Args) string {
+	if len(args.Args) == 2 {
+		return args.Args[1]
+	} else if len(args.Args) == 1 {
+		return args.Room.ID
+	} else {
+		return ""
+	}
+}
+
 func cmdLoop(g *gocui.Gui) {
 	for {
 		args := <-cmdChan
-		if len(args) < 1 {
-			continue
-		}
-		switch args[0] {
+		switch args.Args[0] {
 		case "quit":
 			g.Execute(quit)
+		case "join":
+			if len(args.Args) != 2 {
+				consoleReply(fmt.Sprintf("Usage: %s roomIDorAlias", args.Args[0]))
+			} else {
+				go callJoinRoom(args.Args[1])
+			}
+		case "leave":
+			roomID := roomIDCmd(args)
+			if roomID == "" {
+				consoleReply(fmt.Sprintf("Usage: %s roomID", args.Args[0]))
+				return
+			}
+			go callLeaveRoom(roomID)
+			setCurrentRoom(lastRoom, false)
+			lastRoom = currentRoom
 		default:
-			consoleReply(fmt.Sprintf("Unknown command: %s", args[0]))
+			consoleReply(fmt.Sprintf("Unknown command: %s", args.Args[0]))
 		}
 	}
 }
 
 func consoleReply(rep string) {
 	recvMsgsChan <- MessageRoom{
-		&Message{"m.text", time.Now().Unix(), ConsoleUserId, rep},
+		&Message{"m.text", time.Now().Unix(), ConsoleUserID, rep},
 		rs.ConsoleRoom}
 }
 
 func Init() {
 	rs = NewRooms()
-	AddRoom(ConsoleRoomId, "Console", "")
-	AddUser(ConsoleRoomId, ConsoleUserId, ConsoleUsername, 100, MemJoin)
-	rs.ConsoleRoom = rs.ById[ConsoleRoomId]
+	AddRoom(ConsoleRoomID, "Console", "", "")
+	AddUser(ConsoleRoomID, ConsoleUserID, ConsoleDisplayName, 100, MemJoin)
+	rs.ConsoleRoom = rs.ByID[ConsoleRoomID]
 	if rs.ConsoleRoom != rs.R[0] {
 		panic("ConsoleRoom is not rs.R[0]")
 	}
@@ -644,10 +825,10 @@ func Init() {
 func Start() error {
 	debugBuf = bytes.NewBufferString("")
 	lastRoom = currentRoom
-	if myUserId == "" {
-		return fmt.Errorf("UserId not set")
+	if myUserID == "" {
+		return fmt.Errorf("UserID not set")
 	}
-	AddUser(ConsoleRoomId, myUserId, myUsername, 0, MemJoin)
+	AddUser(ConsoleRoomID, myUserID, myDisplayName, 0, MemJoin)
 	//initRooms()
 	//initMsgs()
 	initReadline()
@@ -687,13 +868,13 @@ func Start() error {
 		}); err != nil {
 		log.Panicln(err)
 	}
-	if err := g.SetKeybinding("", gocui.KeyCtrlU, gocui.ModNone,
+	if err := g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
 			return scrollViewMsgs(g, -viewMsgsHeight/2)
 		}); err != nil {
 		log.Panicln(err)
 	}
-	if err := g.SetKeybinding("", gocui.KeyCtrlD, gocui.ModNone,
+	if err := g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
 			return scrollViewMsgs(g, viewMsgsHeight/2)
 		}); err != nil {
@@ -709,7 +890,7 @@ func Start() error {
 	recvMsgsChan = make(chan MessageRoom, 16)
 	rePrintChan = make(chan string, 16)
 	switchRoomChan = make(chan bool, 16)
-	cmdChan = make(chan []string, 16)
+	cmdChan = make(chan Args, 16)
 
 	go eventLoop(g)
 	go cmdLoop(g)
@@ -718,10 +899,12 @@ func Start() error {
 		time.Sleep(time.Duration(30) * time.Second)
 		rePrintChan <- "statusline"
 	}()
+	rs.UpdateShortcuts()
 	started = true
 	if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
 		return err
 	}
+	//callQuit()
 	return nil
 }
 
@@ -790,7 +973,7 @@ func layout(g *gocui.Gui) error {
 		}
 	}
 	if winNewSize {
-		fmt.Fprintln(debugBuf, "New Size at", time.Now())
+		//fmt.Fprintln(debugBuf, "New Size at", time.Now())
 		viewMsgs, _ := g.View("msgs")
 		printRoomMessages(viewMsgs, currentRoom)
 
@@ -885,17 +1068,6 @@ func printRooms(v *gocui.View) {
 				highEnd)
 		}
 	}
-
-	//fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", rs.ConsoleRoom.Shortcut), rs.ConsoleRoom)
-	//fmt.Fprintf(v, "\n    People\n\n")
-	//for _, r := range rs.PeopleRooms {
-	//	fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
-	//}
-
-	//fmt.Fprintf(v, "\n    Groups\n\n")
-	//for _, r := range rs.GroupRooms {
-	//	fmt.Fprintf(v, "%*s.%s\n", pad, fmt.Sprintf("%d", r.Shortcut), r)
-	//}
 }
 
 func printRoomMessages(v *gocui.View, r *Room) {
@@ -927,23 +1099,33 @@ func printRoomUsers(v *gocui.View, r *Room) {
 
 func printStatusLine(v *gocui.View, r *Room) {
 	v.Clear()
-	u := currentRoom.Users.ById[myUserId]
+	u := currentRoom.Users.ByID[myUserID]
 	power := ""
-	if u.Power > 50 {
-		power = "@"
-	} else if u.Power > 0 {
-		power = "+"
+	if u != nil {
+		if u.Power > 50 {
+			power = "@"
+		} else if u.Power > 0 {
+			power = "+"
+		}
 	}
-	fmt.Fprintf(v, "\x1b[0;37m[%s] [%s%s] %d.%v [%d]",
+	fmt.Fprintf(v, "\x1b[0;37m[%s] [%s%s] %d.%v [%d] %s",
 		time.Now().Format("15:04"),
-		power, myUsername,
-		currentRoom.Shortcut, currentRoom, len(currentRoom.Users.U))
+		power, myDisplayName,
+		currentRoom.Shortcut, currentRoom, len(currentRoom.Users.U),
+		currentRoom.Topic)
 }
 
 func printMessage(v *gocui.View, m *Message, r *Room) {
 	msgWidth, _ := v.Size()
 	t := time.Unix(m.Ts, 0)
-	user := r.Users.ById[m.UserId]
+	user := r.Users.ByID[m.UserID]
+	var color byte
+	if user == nil {
+		user = &User{ID: m.UserID, DispName: m.UserID, DispNameHash: 0}
+		color = 244
+	} else {
+		color = nick256Colors[user.DispNameHash%uint32(len(nick256Colors))]
+	}
 	//displayName := ""
 	//if user.Power >= 50 {
 	//	displayName = fmt.Sprintf("@%s", user)
@@ -951,26 +1133,38 @@ func printMessage(v *gocui.View, m *Message, r *Room) {
 	//	displayName = fmt.Sprintf("%s", user)
 	//}
 	//fmt.Fprintln(debugBuf, r.Users.U[1])
-	//fmt.Fprintln(debugBuf, r.Users.ById[user.Id])
+	//fmt.Fprintln(debugBuf, r.Users.ByID[user.ID])
 	username := strPadLeft(user.String(), timelineUserWidth-10, ' ')
 	//color := nickRGBColors[user.DispNameHash%uint32(len(nickRGBColors))]
 	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
-	color := nick256Colors[user.DispNameHash%uint32(len(nick256Colors))]
 	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
 	//username = fmt.Sprintf("\x1b[38;2;255;0;0m%s\x1b[0;0m", "HOLA")
 	fmt.Fprint(v, t.Format("15:04:05"), " ", username, " ")
+	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
+	viewMsgsWidth := msgWidth - timelineUserWidth
 	lines := 1
 	strLen := 0
 	for i, w := range strings.Split(m.Body, " ") {
-		if strLen+len(w)+1 > msgWidth-timelineUserWidth {
+		w = strings.Replace(w, "\n",
+			fmt.Sprintf("\n%s", timeLineSpace), -1)
+		if strLen+len(w)+1 > viewMsgsWidth {
 			if strLen != 0 {
-				fmt.Fprint(v, "\n", strings.Repeat(" ", timelineUserWidth))
+				fmt.Fprint(v, "\n", timeLineSpace)
 				lines += 1
 				strLen = 0
 			}
-			fmt.Fprint(v, w)
-			lines += int(len(w) / msgWidth)
-			strLen += len(w) % msgWidth
+			for w != "" {
+				end := min(viewMsgsWidth, len(w))
+				chunk := w[:end]
+				w = w[end:]
+				if w == "" {
+					fmt.Fprint(v, chunk)
+				} else {
+					fmt.Fprint(v, chunk, "\n", timeLineSpace)
+					lines += 1
+				}
+			}
+			strLen += len(w) % viewMsgsWidth
 		} else {
 			if i != 0 {
 				fmt.Fprint(v, " ")
@@ -1011,8 +1205,12 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 }
 
 func sendMsg(body string, room *Room) error {
-	msg := Message{"m.text", time.Now().Unix(), myUserId, body}
-	sentMsgsChan <- MessageRoom{&msg, room}
+	if body[0] == '/' || room == rs.ConsoleRoom {
+		msg := Message{"m.text", time.Now().Unix(), myUserID, body}
+		sentMsgsChan <- MessageRoom{&msg, room}
+	} else {
+		go callSendText(room.ID, body)
+	}
 	return nil
 }
 

@@ -6,7 +6,7 @@ import (
 	"log"
 )
 
-var myUsername = "dhole"
+var myDisplayName = "dhole"
 var myUserId = "@dhole:matrix.org"
 
 func initMsgs() {
@@ -36,7 +36,7 @@ func initRooms() {
 	ui.AddRoom("!xAbiTnitnIIjlhlaWC:matrix.org", "Criptica",
 		"Defensant la teva privacitat des de 1984")
 
-	ui.AddUser("!xAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 100, ui.MemJoin)
+	ui.AddUser("!xAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 100, ui.MemJoin)
 	ui.AddUser("!xAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 100, ui.MemJoin)
 	ui.AddUser("!xAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 100, ui.MemJoin)
 	ui.AddUser("!xAbiTnitnIIjlhlaWC:matrix.org", "@e:matrix.org", "Eve", 0, ui.MemJoin)
@@ -48,44 +48,44 @@ func initRooms() {
 		"my_user_name_is_very_long", 0, ui.MemJoin)
 
 	ui.AddRoom("!cZaiLMbuSWouYFGEDS:matrix.org", "", "")
-	ui.AddUser("!cZaiLMbuSWouYFGEDS:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!cZaiLMbuSWouYFGEDS:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!cZaiLMbuSWouYFGEDS:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 
 	ui.AddRoom("!aAbiTnitnIIjlhlaWC:matrix.org", "", "")
-	ui.AddUser("!aAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!aAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!aAbiTnitnIIjlhlaWC:matrix.org", "@j:matrix.org", "Johnny", 0, ui.MemJoin)
 
 	ui.AddRoom("!bAbiTnitnIIjlhlaWC:matrix.org", "", "")
-	ui.AddUser("!bAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!bAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!bAbiTnitnIIjlhlaWC:matrix.org", "@ja:matrix.org", "Jane", 0, ui.MemJoin)
 
 	ui.AddRoom("!cAbiTnitnIIjlhlaWC:matrix.org", "#debian-reproducible", "")
-	ui.AddUser("!cAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!cAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!cAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 	ui.AddUser("!cAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 0, ui.MemJoin)
 
 	ui.AddRoom("!dAbiTnitnIIjlhlaWC:matrix.org", "#reproducible-builds", "")
-	ui.AddUser("!dAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!dAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!dAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 	ui.AddUser("!dAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 0, ui.MemJoin)
 
 	ui.AddRoom("!eAbiTnitnIIjlhlaWC:matrix.org", "#openbsd", "")
-	ui.AddUser("!eAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!eAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!eAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 	ui.AddUser("!eAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 0, ui.MemJoin)
 
 	ui.AddRoom("!fAbiTnitnIIjlhlaWC:matrix.org", "#gbdev", "")
-	ui.AddUser("!fAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!fAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!fAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 	ui.AddUser("!fAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 0, ui.MemJoin)
 
 	ui.AddRoom("!gAbiTnitnIIjlhlaWC:matrix.org", "#archlinux", "")
-	ui.AddUser("!gAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!gAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!gAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 	ui.AddUser("!gAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 0, ui.MemJoin)
 
 	ui.AddRoom("!hAbiTnitnIIjlhlaWC:matrix.org", "#rust", "")
-	ui.AddUser("!hAbiTnitnIIjlhlaWC:matrix.org", myUserId, myUsername, 0, ui.MemJoin)
+	ui.AddUser("!hAbiTnitnIIjlhlaWC:matrix.org", myUserId, myDisplayName, 0, ui.MemJoin)
 	ui.AddUser("!hAbiTnitnIIjlhlaWC:matrix.org", "@a:matrix.org", "Alice", 0, ui.MemJoin)
 	ui.AddUser("!hAbiTnitnIIjlhlaWC:matrix.org", "@b:matrix.org", "Bob", 0, ui.MemJoin)
 
@@ -94,8 +94,8 @@ func initRooms() {
 func main() {
 	ui.Init()
 
-	ui.SetMyUsername(myUsername)
-	ui.SetMyUserId(myUserId)
+	ui.SetMyDisplayName(myDisplayName)
+	ui.SetMyUserID(myUserId)
 	initRooms()
 	initMsgs()
 

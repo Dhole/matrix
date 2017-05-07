@@ -2,6 +2,7 @@ package trinity
 
 import (
 	"../list"
+	mor "../morpheus"
 	"bytes"
 	"fmt"
 	//"github.com/jroimartin/gocui"
@@ -9,7 +10,6 @@ import (
 	"hash/adler32"
 	//"io"
 	"log"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,69 +17,6 @@ import (
 
 type RGBColor struct { // U
 	r, g, b byte
-}
-
-type Message struct {
-	MsgType string
-	Ts      int64
-	UserID  string
-	Body    string
-}
-
-type Membership int // B
-
-const ( // B
-	MemInvite Membership = iota
-	MemJoin   Membership = iota
-	MemLeave  Membership = iota
-)
-
-const (
-	ConsoleUserID      string = "@trinity:localhost"
-	ConsoleDisplayName string = "trinity"
-	ConsoleRoomID      string = "!console:localhost"
-)
-
-type User struct {
-	ID           string     // B
-	Name         string     // B
-	DispName     string     // B
-	DispNameHash uint32     // U
-	Power        int        // B
-	Mem          Membership // B
-}
-
-type Users struct {
-	U      []*User            // B
-	ByID   map[string]*User   // B
-	ByName map[string][]*User // B
-}
-
-type Room struct {
-	ID                  string     // B
-	Name                string     // B
-	DispName            string     // B
-	CanonAlias          string     // B
-	Topic               string     // B
-	Shortcut            int        // U
-	Fav                 bool       // U
-	Users               Users      // B
-	NewUserBatch        bool       // B
-	Msgs                *list.List // B
-	ViewMsgsOriginY     int        // U
-	ScrollBottom        bool       // U
-	ViewReadlineBuf     string     // U
-	ViewReadlineCursorX int        // U
-}
-
-type Rooms struct {
-	R           []*Room            // B
-	ByID        map[string]*Room   // B
-	ByName      map[string][]*Room // B
-	ByShortcut  map[int]*Room      // U
-	PeopleRooms []*Room            // U
-	GroupRooms  []*Room            // U
-	ConsoleRoom *Room              // B
 }
 
 type MessageRoom struct {
@@ -93,6 +30,57 @@ type Args struct { // U
 }
 
 type Words []string // U
+
+type UserUI struct {
+	DispNameHash uint32 // U
+}
+
+type RoomUI struct {
+	Shortcut            int    // U
+	Fav                 bool   // U
+	ViewMsgsOriginY     int    // U
+	ScrollBottom        bool   // U
+	ViewReadlineBuf     string // U
+	ViewReadlineCursorX int    // U
+}
+
+type RoomsUI struct {
+	ByShortcut  map[int]*mor.Room // U
+	PeopleRooms []*mor.Room       // U
+	GroupRooms  []*mor.Room       // U
+}
+
+func initRoomsUI(rs *mor.Rooms) {
+	rs.UI = &RoomUI{ByShortcut: make(map[int]*mor.Room)}
+}
+
+func getRoomsUI(rs *mor.Rooms) *RoomsUI {
+	return rs.UI.(*RoomsUI)
+}
+
+func (rs *Rooms) UpdateShortcuts() {
+	rs.ByShortcut = make(map[int]*Room)
+	rs.PeopleRooms = make([]*Room, 0)
+	rs.GroupRooms = make([]*Room, 0)
+	count := 0
+	rs.ByShortcut[0] = rs.ConsoleRoom
+	for _, r := range rs.R[1:] {
+		if len(r.Users.U) == 2 {
+			count++
+			r.Shortcut = count
+			rs.PeopleRooms = append(rs.PeopleRooms, r)
+			rs.ByShortcut[r.Shortcut] = r
+		}
+	}
+	for _, r := range rs.R[1:] {
+		if len(r.Users.U) != 2 {
+			count++
+			r.Shortcut = count
+			rs.GroupRooms = append(rs.GroupRooms, r)
+			rs.ByShortcut[r.Shortcut] = r
+		}
+	}
+}
 
 // CONFIG
 
@@ -126,9 +114,8 @@ var callQuit func()
 var myDisplayName string
 var myUserID string
 
-var currentRoom *Room
-var lastRoom *Room
-var rs Rooms
+var currentRoom *mor.Room
+var lastRoom *mor.Room
 
 var debugBuf *bytes.Buffer
 
@@ -153,71 +140,6 @@ var cmdChan chan Args
 var started bool
 
 // END GLOBALS
-
-func (r *Room) String() string {
-	return r.DispName
-}
-
-func (r *Room) UpdateDispName() {
-	if r.Name != "" {
-		r.DispName = r.Name
-		return
-	}
-	if r.CanonAlias != "" {
-		r.DispName = r.CanonAlias
-		return
-	}
-	roomUserIDs := make([]string, 0)
-	for k := range r.Users.ByID {
-		if k == myUserID {
-			continue
-		}
-		roomUserIDs = append(roomUserIDs, k)
-	}
-	if len(roomUserIDs) == 1 {
-		r.DispName = r.Users.ByID[roomUserIDs[0]].String()
-		return
-	}
-	sort.Strings(roomUserIDs)
-	if len(roomUserIDs) == 2 {
-		r.DispName = fmt.Sprintf("%s and %s", r.Users.ByID[roomUserIDs[0]],
-			r.Users.ByID[roomUserIDs[1]])
-		return
-	}
-	if len(roomUserIDs) > 2 {
-		r.DispName = fmt.Sprintf("%s and %d others", r.Users.ByID[roomUserIDs[0]],
-			len(roomUserIDs)-1)
-		return
-	}
-	r.DispName = "Emtpy room"
-}
-
-func (u *User) String() string {
-	if displayNamesID {
-		return u.ID
-	} else {
-		return u.DispName
-	}
-}
-
-func (u *User) UpdateDispName(r *Room, roomUpdateDispName bool) {
-	if roomUpdateDispName {
-		defer r.UpdateDispName()
-	}
-	defer func() {
-		u.DispNameHash = adler32.Checksum([]byte(u.DispName))
-	}()
-	if u.Name == "" {
-		u.DispName = u.ID
-		return
-	}
-	if len(r.Users.ByName[u.Name]) > 1 {
-		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.ID)
-		return
-	}
-	u.DispName = u.Name
-	return
-}
 
 func min(x, y int) int {
 	if x < y {
@@ -340,119 +262,6 @@ func readMultiLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 	readLine(v, key, ch, mod)
 }
 
-func NewUsers() (us Users) {
-	us.U = make([]*User, 0)
-	us.ByID = make(map[string]*User, 0)
-	us.ByName = make(map[string][]*User, 0)
-	return us
-}
-
-func (us *Users) Add(id, name string, power int, mem Membership) {
-	u := &User{
-		ID:           id,
-		Name:         name,
-		DispName:     "",
-		DispNameHash: 0,
-		Power:        power,
-		Mem:          mem,
-	}
-	us.U = append(us.U, u)
-	us.ByID[u.ID] = u
-	if u.Name != "" {
-		if us.ByName[u.Name] == nil {
-			us.ByName[u.Name] = make([]*User, 0)
-		}
-		us.ByName[u.Name] = append(us.ByName[u.Name], u)
-	}
-	//fmt.Fprintf(debugBuf, "us:      %p\n", &us.U[len(us.U)-1])
-	//fmt.Fprintf(debugBuf, "us.ByID: %p\n", us.ByID[u.ID])
-	//fmt.Fprintf(debugBuf, "_u:      %p\n", _u)
-}
-
-func (us *Users) Del(u User) {
-	// TODO
-	// TODO: What if there are two users with the same name?
-}
-
-func (us *Users) SetUserName(u User, name string) {
-	// TODO
-	// TODO: What if there are two users with the same name?
-}
-
-func NewRoom(id, name, canonAlias, topic string) (r *Room) {
-	r = &Room{}
-	r.ID = id
-	r.Name = name
-	r.CanonAlias = canonAlias
-	r.Topic = topic
-	r.Users = NewUsers()
-	//r.Msgs = make([]Message, 0)
-	r.Msgs = list.New()
-	return r
-}
-
-func NewRooms() (rs Rooms) {
-	rs.R = make([]*Room, 0)
-	rs.ByID = make(map[string]*Room, 0)
-	rs.ByName = make(map[string][]*Room, 0)
-	return rs
-}
-
-func (rs *Rooms) Add(r *Room) {
-	rs.R = append(rs.R, r)
-	rs.ByID[r.ID] = r
-	if r.Name != "" {
-		if rs.ByName[r.Name] == nil {
-			rs.ByName[r.Name] = make([]*Room, 0)
-		}
-		rs.ByName[r.Name] = append(rs.ByName[r.Name], r)
-	}
-}
-
-func (rs *Rooms) Del(r *Room) {
-	delete(rs.ByID, r.ID)
-	if r.Name != "" {
-		delete(rs.ByName, r.Name)
-	}
-	newR := make([]*Room, 0, len(rs.R)-1)
-	for _, room := range rs.R {
-		if room == r {
-			continue
-		}
-		newR = append(newR, room)
-	}
-	rs.R = newR
-}
-
-func (rs *Rooms) SetRoomName(r Room, name string) {
-	// TODO
-	// TODO: What if there are two rooms with the same name?
-}
-
-func (rs *Rooms) UpdateShortcuts() {
-	rs.ByShortcut = make(map[int]*Room)
-	rs.PeopleRooms = make([]*Room, 0)
-	rs.GroupRooms = make([]*Room, 0)
-	count := 0
-	rs.ByShortcut[0] = rs.ConsoleRoom
-	for _, r := range rs.R[1:] {
-		if len(r.Users.U) == 2 {
-			count++
-			r.Shortcut = count
-			rs.PeopleRooms = append(rs.PeopleRooms, r)
-			rs.ByShortcut[r.Shortcut] = r
-		}
-	}
-	for _, r := range rs.R[1:] {
-		if len(r.Users.U) != 2 {
-			count++
-			r.Shortcut = count
-			rs.GroupRooms = append(rs.GroupRooms, r)
-			rs.ByShortcut[r.Shortcut] = r
-		}
-	}
-}
-
 func SetMyDisplayName(username string) {
 	myDisplayName = username
 }
@@ -477,141 +286,23 @@ func SetCallQuit(call func()) {
 	callQuit = call
 }
 
-func AddRoom(roomID, name, canonAlias, topic string) error {
-	_, ok := rs.ByID[roomID]
-	if ok {
-		return fmt.Errorf("Room %v already exists", roomID)
-	}
-	r := NewRoom(roomID, name, canonAlias, topic)
-	r.UpdateDispName()
-	rs.Add(r)
-	rs.UpdateShortcuts()
-	if started {
-		rePrintChan <- "rooms"
-	}
-	return nil
-}
+//func AddRoom()
+//rs.UpdateShortcuts()
 
-func DelRoom(roomID string) (string, error) {
-	r, ok := rs.ByID[roomID]
-	if !ok {
-		return "", fmt.Errorf("Room %v doesn't exists", roomID)
-	}
-	rs.Del(r)
-	rs.UpdateShortcuts()
-	if started {
-		rePrintChan <- "rooms"
-	}
-	return r.Name, nil
-}
-
-func AddUser(roomID, userID, username string, power int, membership Membership) error {
-	r, ok := rs.ByID[roomID]
-	if !ok {
-		return fmt.Errorf("Room %v doesn't exist", roomID)
-	}
-	r.Users.Add(userID, username, power, membership)
-	for _, u := range r.Users.U {
-		u.UpdateDispName(r, true)
-	}
-	r.UpdateDispName()
-	if started {
-		if r == currentRoom {
-			rePrintChan <- "users"
-			rePrintChan <- "statusline"
-		}
-		if len(r.Users.U) <= 3 {
-			rs.UpdateShortcuts()
-			rePrintChan <- "rooms"
-		}
-	}
-	return nil
-}
-
-func AddUserBatch(roomID, userID, username string, power int, membership Membership) error {
-	r, ok := rs.ByID[roomID]
-	if !ok {
-		return fmt.Errorf("Room %v doesn't exist", roomID)
-	}
-	r.Users.Add(userID, username, power, membership)
-	r.NewUserBatch = true
-	return nil
-}
-
-func AddUserBatchFinish() {
-	updatedCurrentRoom := false
-	for _, r := range rs.R {
-		if !r.NewUserBatch {
-			continue
-		}
-		for _, u := range r.Users.U {
-			u.UpdateDispName(r, false)
-		}
-		r.UpdateDispName()
-		r.NewUserBatch = false
-		if r == currentRoom {
-			updatedCurrentRoom = true
-		}
-	}
-	if started {
-		rs.UpdateShortcuts()
-		rePrintChan <- "rooms"
-		if updatedCurrentRoom {
-			rePrintChan <- "users"
-			rePrintChan <- "msgs"
-			rePrintChan <- "statusline"
-		}
-	}
-}
-
-func AddConsoleMessage(body string) {
-	AddMessage(ConsoleRoomID, "m.text", time.Now().Unix(), ConsoleUserID, body)
-}
+//func AddUser(roomID, userID, username string, power int, membership Membership) error {
+//	if started {
+//		if r == currentRoom {
+//			rePrintChan <- "users"
+//			rePrintChan <- "statusline"
+//		}
+//		if len(r.Users.U) <= 3 {
+//			rs.UpdateShortcuts()
+//			rePrintChan <- "rooms"
+//		}
+//	}
+//}
 
 // DEBUG
-func PushFrontMessage(roomID, msgType string, ts int64, userID, body string) error {
-	r, ok := rs.ByID[roomID]
-	if !ok {
-		return fmt.Errorf("Room %v doesn't exist", roomID)
-	}
-	m := Message{msgType, ts, userID, body}
-	// Deliberately doesn't reprint the room because this is DEBUG
-	r.Msgs.PushFront(m)
-	return nil
-}
-
-func AddMessage(roomID, msgType string, ts int64, userID, body string) error {
-	r, ok := rs.ByID[roomID]
-	if !ok {
-		return fmt.Errorf("Room %v doesn't exist", roomID)
-	}
-	_, ok = r.Users.ByID[userID]
-	if !ok {
-		// We tolerate messages from non existing users.  We take care
-		// in printMessage of that case
-		AddConsoleMessage(fmt.Sprintf("AddMessage: User %v doesn't exist in room %v",
-			userID, roomID))
-	}
-	m := Message{msgType, ts, userID, body}
-	if started {
-		recvMsgsChan <- MessageRoom{&m, r}
-	} else {
-		r.Msgs.PushBack(m)
-	}
-	return nil
-}
-
-func Debugln(args ...interface{}) {
-	fmt.Fprintln(debugBuf, args...)
-	rePrintChan <- "debug"
-}
-
-func Debugf(format string, args ...interface{}) {
-	fmt.Fprintf(debugBuf, format, args...)
-	fmt.Fprint(debugBuf, "\n")
-	rePrintChan <- "debug"
-}
-
 func initReadline() {
 	readlineBuf = make([]Words, 1)
 	readlineIDx = 0
@@ -837,27 +528,26 @@ func cmdLoop(g *gocui.Gui) {
 
 func consoleReply(rep string) {
 	recvMsgsChan <- MessageRoom{
-		&Message{"m.text", time.Now().Unix(), ConsoleUserID, rep},
+		&Message{"m.text", time.Now().Unix() * 1000, ConsoleUserID, rep},
 		rs.ConsoleRoom}
 }
 
-func Init() {
-	rs = NewRooms()
-	AddRoom(ConsoleRoomID, "Console", "", "")
-	AddUser(ConsoleRoomID, ConsoleUserID, ConsoleDisplayName, 100, MemJoin)
-	rs.ConsoleRoom = rs.ByID[ConsoleRoomID]
-	if rs.ConsoleRoom != rs.R[0] {
-		panic("ConsoleRoom is not rs.R[0]")
-	}
-	rs.ConsoleRoom.Shortcut = 0
-	currentRoom = rs.ConsoleRoom
+func main() {
+	cli, err := morpheus.NewClient("morpheus", []string{"."})
+
+	//
+	// Init
+
+	initRoomsUI(&cli.Rs)
+	getRoomUI(cli.Rs.ConsoleRoom)[0] = cli.Rs.ConsoleRoom
+
+	currentRoom = cli.Rs.ConsoleRoom
 	lastRoom = currentRoom
 	//currentRoom = rs.ConsoleRoom
-}
 
-func Start() error {
-	debugBuf = bytes.NewBufferString("")
-	lastRoom = currentRoom
+	//
+	// Start
+
 	if myUserID == "" {
 		return fmt.Errorf("UserID not set")
 	}
@@ -938,7 +628,6 @@ func Start() error {
 		return err
 	}
 	//callQuit()
-	return nil
 }
 
 func strPadLeft(s string, pLen int, pad rune) string {
@@ -1152,7 +841,7 @@ func printStatusLine(v *gocui.View, r *Room) {
 
 func printMessage(v *gocui.View, m *Message, r *Room) {
 	msgWidth, _ := v.Size()
-	t := time.Unix(m.Ts, 0)
+	t := time.Unix(m.Ts/1000, 0)
 	user := r.Users.ByID[m.UserID]
 	var color byte
 	if user == nil {
@@ -1256,7 +945,7 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 
 func sendMsg(body string, room *Room) error {
 	if body[0] == '/' || room == rs.ConsoleRoom {
-		msg := Message{"m.text", time.Now().Unix(), myUserID, body}
+		msg := Message{"m.text", time.Now().Unix() * 1000, myUserID, body}
 		sentMsgsChan <- MessageRoom{&msg, room}
 	} else {
 		go callSendText(room.ID, body)

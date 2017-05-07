@@ -147,6 +147,7 @@ func main() {
 	cli.SetCredentials(res.UserID, res.AccessToken)
 
 	ui.AddConsoleMessage("Doing initial sync request ...")
+	//`{"room":{"timeline":{"limit":50}}}`
 	resSync, err := cli.SyncRequest(30000, "", "", false, "online")
 	if err != nil {
 		panic(err)
@@ -154,6 +155,7 @@ func main() {
 	ui.AddConsoleMessage("Initial sync request finished")
 	//fmt.Println("Joined rooms...")
 	for roomID, roomHist := range resSync.Rooms.Join {
+		AddRoomData(cli, roomID)
 		//fmt.Println(roomID)
 		ui.Debugf("room %s has %d timeline.events",
 			roomID, len(roomHist.Timeline.Events))
@@ -167,8 +169,47 @@ func main() {
 			//	ui.AddConsoleMessage(fmt.Sprintf("%+v", ev))
 			//}
 		}
-		AddRoomData(cli, roomID)
+		// Fetch a few previous messages
+		start := roomHist.Timeline.PrevBatch
+		end := ""
+		count := 0
+		for {
+			resMessages, err := cli.Messages(roomID, start, end, 'b', 0)
+			if err != nil {
+				fmt.Println(err)
+				break
+			}
+			if len(resMessages.Chunk) == 0 {
+				break
+			}
+			for _, ev := range resMessages.Chunk {
+				body, ok := ev.Body()
+				if ok {
+					count++
+					ui.PushFrontMessage(roomID, ev.Type,
+						int64(ev.Timestamp/1000), ev.Sender, body)
+				}
+			}
+			if count >= 50 {
+				break
+			}
+			start = resMessages.End
+		}
+
+		// TODO: Populate rooms state
+		// NOTE: Don't display state events in the timeline
+		//for _, ev := range roomHist.State.Events {
+		//}
 	}
+	// TODO: Populate invited rooms
+	//for roomID, roomHist := range resSync.Rooms.Invite {
+	// NOTE: Don't display state events in the timeline
+	//for _, ev := range roomHist.State.Events {
+	//}
+	//}
+	// TODO: Populate account data
+	//for _, ev := range resSync.AccountData.Events {
+	//}
 
 	// TODO: Do this only if the already set display name doesn't match the config
 	//if c.DisplayName != "" {

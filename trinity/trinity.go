@@ -12,9 +12,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-type RGBColor struct {
+type RGBColor struct { // U
 	r, g, b byte
 }
 
@@ -25,9 +26,9 @@ type Message struct {
 	Body    string
 }
 
-type Membership int
+type Membership int // B
 
-const (
+const ( // B
 	MemInvite Membership = iota
 	MemJoin   Membership = iota
 	MemLeave  Membership = iota
@@ -40,48 +41,45 @@ const (
 )
 
 type User struct {
-	ID           string
-	Name         string
-	DispName     string
-	DispNameHash uint32
-	Power        int
-	Mem          Membership
+	ID           string     // B
+	Name         string     // B
+	DispName     string     // B
+	DispNameHash uint32     // U
+	Power        int        // B
+	Mem          Membership // B
 }
 
 type Users struct {
-	U      []*User
-	ByID   map[string]*User
-	ByName map[string][]*User
+	U      []*User            // B
+	ByID   map[string]*User   // B
+	ByName map[string][]*User // B
 }
 
 type Room struct {
-	ID           string
-	Name         string
-	DispName     string
-	CanonAlias   string
-	Topic        string
-	Shortcut     int
-	Fav          bool
-	Users        Users
-	NewUserBatch bool
-	//Msgs         []Message
-	Msgs *list.List
-	//ViewUsersBuf   *string
-	//ViewMsgsBuf    *string
-	ViewMsgsOriginY     int
-	ScrollBottom        bool
-	ViewReadlineBuf     string
-	ViewReadlineCursorX int
+	ID                  string     // B
+	Name                string     // B
+	DispName            string     // B
+	CanonAlias          string     // B
+	Topic               string     // B
+	Shortcut            int        // U
+	Fav                 bool       // U
+	Users               Users      // B
+	NewUserBatch        bool       // B
+	Msgs                *list.List // B
+	ViewMsgsOriginY     int        // U
+	ScrollBottom        bool       // U
+	ViewReadlineBuf     string     // U
+	ViewReadlineCursorX int        // U
 }
 
 type Rooms struct {
-	R           []*Room
-	ByID        map[string]*Room
-	ByName      map[string][]*Room
-	ByShortcut  map[int]*Room
-	PeopleRooms []*Room
-	GroupRooms  []*Room
-	ConsoleRoom *Room
+	R           []*Room            // B
+	ByID        map[string]*Room   // B
+	ByName      map[string][]*Room // B
+	ByShortcut  map[int]*Room      // U
+	PeopleRooms []*Room            // U
+	GroupRooms  []*Room            // U
+	ConsoleRoom *Room              // B
 }
 
 type MessageRoom struct {
@@ -89,12 +87,12 @@ type MessageRoom struct {
 	Room    *Room
 }
 
-type Args struct {
+type Args struct { // U
 	Room *Room
 	Args []string
 }
 
-type Words []string
+type Words []string // U
 
 // CONFIG
 
@@ -570,6 +568,18 @@ func AddConsoleMessage(body string) {
 	AddMessage(ConsoleRoomID, "m.text", time.Now().Unix(), ConsoleUserID, body)
 }
 
+// DEBUG
+func PushFrontMessage(roomID, msgType string, ts int64, userID, body string) error {
+	r, ok := rs.ByID[roomID]
+	if !ok {
+		return fmt.Errorf("Room %v doesn't exist", roomID)
+	}
+	m := Message{msgType, ts, userID, body}
+	// Deliberately doesn't reprint the room because this is DEBUG
+	r.Msgs.PushFront(m)
+	return nil
+}
+
 func AddMessage(roomID, msgType string, ts int64, userID, body string) error {
 	r, ok := rs.ByID[roomID]
 	if !ok {
@@ -577,7 +587,10 @@ func AddMessage(roomID, msgType string, ts int64, userID, body string) error {
 	}
 	_, ok = r.Users.ByID[userID]
 	if !ok {
-		return fmt.Errorf("User %v doesn't exist in room %v", userID, roomID)
+		// We tolerate messages from non existing users.  We take care
+		// in printMessage of that case
+		AddConsoleMessage(fmt.Sprintf("AddMessage: User %v doesn't exist in room %v",
+			userID, roomID))
 	}
 	m := Message{msgType, ts, userID, body}
 	if started {
@@ -585,7 +598,6 @@ func AddMessage(roomID, msgType string, ts int64, userID, body string) error {
 	} else {
 		r.Msgs.PushBack(m)
 	}
-
 	return nil
 }
 
@@ -796,6 +808,27 @@ func cmdLoop(g *gocui.Gui) {
 			go callLeaveRoom(roomID)
 			setCurrentRoom(lastRoom, false)
 			lastRoom = currentRoom
+		case "reset": // Clear gocui artifacts from the screen
+			g.Execute(func(g *gocui.Gui) error {
+				maxX, maxY := g.Size()
+				v, err := g.SetView("clear", -1, -1, maxX, maxY)
+				if err != nil {
+					if err != gocui.ErrUnknownView {
+						return err
+					}
+				}
+				for i := 0; i < maxY; i++ {
+					fmt.Fprintln(v, strings.Repeat("*", maxX))
+				}
+				g.SetViewOnTop("clear")
+				return nil
+			})
+			time.Sleep(time.Duration(50) * time.Millisecond)
+			g.Execute(func(g *gocui.Gui) error {
+				g.DeleteView("clear")
+				return nil
+			})
+
 		default:
 			consoleReply(fmt.Sprintf("Unknown command: %s", args.Args[0]))
 		}
@@ -909,18 +942,20 @@ func Start() error {
 }
 
 func strPadLeft(s string, pLen int, pad rune) string {
-	if len(s) > pLen-2 {
+	sLen := utf8.RuneCountInString(s)
+	if sLen > pLen-2 {
 		return s[:pLen-2] + ".."
 	} else {
-		return strings.Repeat(string(pad), pLen-len(s)) + s
+		return strings.Repeat(string(pad), pLen-sLen) + s
 	}
 }
 
 func strPadRight(s string, pLen int, pad rune) string {
-	if len(s) > pLen-2 {
+	sLen := utf8.RuneCountInString(s)
+	if sLen > pLen-2 {
 		return s[:pLen-2] + ".."
 	} else {
-		return s + strings.Repeat(string(pad), pLen-len(s))
+		return s + strings.Repeat(string(pad), pLen-sLen)
 	}
 }
 func setCurrentRoom(r *Room, toggle bool) {
@@ -1142,39 +1177,54 @@ func printMessage(v *gocui.View, m *Message, r *Room) {
 	fmt.Fprint(v, t.Format("15:04:05"), " ", username, " ")
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth
-	lines := 1
-	strLen := 0
-	for i, w := range strings.Split(m.Body, " ") {
-		w = strings.Replace(w, "\n",
-			fmt.Sprintf("\n%s", timeLineSpace), -1)
-		if strLen+len(w)+1 > viewMsgsWidth {
-			if strLen != 0 {
-				fmt.Fprint(v, "\n", timeLineSpace)
-				lines += 1
-				strLen = 0
-			}
-			for w != "" {
-				end := min(viewMsgsWidth, len(w))
-				chunk := w[:end]
-				w = w[end:]
-				if w == "" {
-					fmt.Fprint(v, chunk)
-				} else {
-					fmt.Fprint(v, chunk, "\n", timeLineSpace)
-					lines += 1
-				}
-			}
-			strLen += len(w) % viewMsgsWidth
-		} else {
-			if i != 0 {
-				fmt.Fprint(v, " ")
-				strLen += 1
-			}
-			fmt.Fprint(v, w)
-			strLen += len(w)
+	body := strings.Replace(m.Body, "\x1b", "\\x1b", -1)
+	lines := 0
+	for i, l := range strings.Split(body, "\n") {
+		strLen := 0
+		if i != 0 {
+			fmt.Fprint(v, timeLineSpace)
 		}
+		for j, w := range strings.Split(l, " ") {
+			wLen := utf8.RuneCountInString(w)
+			if !utf8.ValidString(w) {
+				w = "\x1b[38;5;1mUTF8-ERR\x1b[0;0m"
+				wLen = len("UTF8-ERR")
+			}
+			if strLen+wLen+1 > viewMsgsWidth {
+				if strLen != 0 {
+					fmt.Fprint(v, "\n", timeLineSpace)
+					lines += 1
+					strLen = 0
+				}
+				if wLen <= viewMsgsWidth {
+					fmt.Fprint(v, w)
+					strLen += wLen
+					continue
+				}
+				wRunes := bytes.Runes([]byte(w))
+				for len(wRunes) != 0 {
+					end := min(viewMsgsWidth, len(wRunes))
+					chunk := wRunes[:end]
+					wRunes = wRunes[end:]
+					fmt.Fprint(v, string(chunk))
+					if len(wRunes) != 0 {
+						fmt.Fprint(v, "\n", timeLineSpace)
+						lines += 1
+					}
+				}
+				strLen += wLen % viewMsgsWidth
+			} else {
+				if j != 0 {
+					fmt.Fprint(v, " ")
+					strLen += 1
+				}
+				fmt.Fprint(v, w)
+				strLen += wLen
+			}
+		}
+		fmt.Fprint(v, "\n")
+		lines += 1
 	}
-	fmt.Fprint(v, "\n")
 	viewMsgsLines += lines
 }
 

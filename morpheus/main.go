@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/matrix-org/gomatrix"
+	"time"
 	//"github.com/pkg/profile"
 	"github.com/spf13/viper"
 	"strings"
@@ -57,11 +58,19 @@ func (c *Client) loadRoomAndData(roomID string) {
 		if userData.DisplayName != nil {
 			username = *userData.DisplayName
 		}
-		r.AddUserBatch(userID, username, 0, MemJoin)
+		r.Users.AddBatch(userID, username, 0, MemJoin)
 	}
 	//fmt.Println(roomID, "Batch add complete")
-	r.AddUserBatchFinish()
+	r.Users.AddBatchFinish()
 	//fmt.Println(roomID, "Batch finish complete")
+}
+
+func (c *Client) GetUserID() string {
+	return c.cfg.UserID
+}
+
+func (c *Client) GetDisplayName() string {
+	return c.cfg.DisplayName
 }
 
 func (c *Client) AddRoom(roomID, name, canonAlias, topic string) (*Room, error) {
@@ -76,15 +85,29 @@ func (c *Client) ConsolePrint(args ...interface{}) {
 	c.Rs.AddConsoleMessage(fmt.Sprint(args...))
 }
 
+type MessageRoom struct {
+	Message *Message
+	Room    *Room
+}
+
+type Args struct {
+	Room *Room
+	Args []string
+}
+
 type Client struct {
 	cli      *gomatrix.Client
 	cfg      Config
 	Rs       Rooms
 	DebugBuf *bytes.Buffer
 	exit     chan error
+
+	//	sentMsgsChan chan MessageRoom
+	RecvMsgsChan chan MessageRoom
+	CmdChan      chan Args
 }
 
-func NewClient(configName string, configPaths []string) (*Client, error) {
+func NewClient(configName string, configPaths []string, call Callbacks) (*Client, error) {
 	//defer profile.Start().Stop()
 	viper.SetConfigType("toml")
 	viper.SetConfigName(configName)
@@ -113,17 +136,20 @@ func NewClient(configName string, configPaths []string) (*Client, error) {
 	//ui.Init()
 	//ui.SetMyDisplayName(c.cfg.DisplayName)
 	//ui.SetMyUserID(c.cfg.UserID)
+	c.RecvMsgsChan = make(chan MessageRoom, 128)
+	c.CmdChan = make(chan Args, 16)
 
 	c.DebugBuf = bytes.NewBufferString("")
 	cli, _ := gomatrix.NewClient(c.cfg.Homeserver, "", "")
 	c.cli = cli
 
+	c.Rs = NewRooms(call)
 	c.Rs.consoleRoomID = ConsoleRoomID
 	c.Rs.ConsoleDisplayName = ConsoleDisplayName
 	c.Rs.ConsoleUserID = ConsoleUserID
-	c.Rs = NewRooms()
 	r, _ := c.AddRoom(c.Rs.consoleRoomID, "Console", "", "")
-	r.AddUser(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
+	r.Users.Add(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
+	r.Users.Add(c.cfg.UserID, c.cfg.DisplayName, 0, MemJoin)
 	c.Rs.ConsoleRoom = c.Rs.ByID[c.Rs.consoleRoomID]
 	if c.Rs.ConsoleRoom != c.Rs.R[0] {
 		panic("ConsoleRoom is not Rs.R[0]")
@@ -132,37 +158,48 @@ func NewClient(configName string, configPaths []string) (*Client, error) {
 	return &c, nil
 }
 
-// Set event callbacks
-//ui.SetCallSendText(func(roomID, body string) {
-//	_, err := cli.SendText(roomID, body)
-//	if err != nil {
-//		ui.AddConsoleMessage(fmt.Sprint("send:", err))
-//		return
-//	}
-//})
-//ui.SetCallJoinRoom(func(roomIDorAlias string) {
-//	resJoin, err := cli.JoinRoom(roomIDorAlias, "", nil)
-//	if err != nil {
-//		ui.AddConsoleMessage(fmt.Sprint("join:", err))
-//		return
-//	}
-//	roomID := resJoin.RoomID
-//	AddRoomData(cli, roomID)
-//})
-//ui.SetCallLeaveRoom(func(roomID string) {
-//	_, err := cli.LeaveRoom(roomID)
-//	if err != nil {
-//		ui.AddConsoleMessage(fmt.Sprint("leave:", err))
-//		return
-//	}
-//	roomName, err := ui.DelRoom(roomID)
-//	if err != nil {
-//		ui.AddConsoleMessage(fmt.Sprint("leave:", err))
-//	} else {
-//		ui.AddConsoleMessage(fmt.Sprintf("Left room (%s) \"%s\"",
-//			roomID, roomName))
-//	}
-//})
+// TODO: Handle error, maybe hold message if unsuccesful
+func (c *Client) SendText(roomID, body string) {
+	if roomID == c.Rs.consoleRoomID || body[0] == '/' {
+		c.Rs.ConsoleRoom.Msgs.PushBack(Message{"m.text",
+			time.Now().Unix() * 1000, c.cfg.UserID, body})
+		// TODO: Send command back to ui (cmdChan)
+	} else {
+		_, err := c.cli.SendText(roomID, body)
+		if err != nil {
+			c.ConsolePrint("send:", err)
+			return
+		}
+	}
+}
+
+// TODO: Return error
+func (c *Client) JoinRoom(roomIDorAlias string) {
+	resJoin, err := c.cli.JoinRoom(roomIDorAlias, "", nil)
+	if err != nil {
+		c.ConsolePrint("join:", err)
+		return
+	}
+	roomID := resJoin.RoomID
+	c.loadRoomAndData(roomID)
+	// TODO: Notify UI of new joined room
+}
+
+// TODO: Return error
+func (c *Client) LeaveRoom(roomID string) {
+	_, err := c.cli.LeaveRoom(roomID)
+	if err != nil {
+		c.ConsolePrint("leave:", err)
+		return
+	}
+	r, err := c.Rs.Del(roomID)
+	if err != nil {
+		c.ConsolePrint("leave:", err)
+		return
+	}
+	c.ConsolePrint("Left room (%s) \"%s\"", roomID, r.DispName)
+	// TODO: Notify UI of left room
+}
 
 func (c *Client) Login() error {
 	c.ConsolePrintf("Logging in to %s ...", c.cfg.Homeserver)
@@ -272,7 +309,9 @@ func (c *Client) Sync() error {
 		}
 		r := c.Rs.ByID[ev.RoomID]
 		if r != nil {
-			r.Msgs.PushBack(Message{msgType, int64(ev.Timestamp), ev.Sender, body})
+			m := &Message{msgType, int64(ev.Timestamp), ev.Sender, body}
+			r.Msgs.PushBack(m)
+			c.RecvMsgsChan <- MessageRoom{m, r}
 		} else {
 			fmt.Fprintf(c.DebugBuf,
 				"Received message for room %v, which doesn't exist", ev.RoomID)

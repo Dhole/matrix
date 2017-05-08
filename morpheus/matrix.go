@@ -20,20 +20,20 @@ type Message struct {
 	Body    string
 }
 
-type Membership int // B
+type Membership int
 
-const ( // B
+const (
 	MemInvite Membership = iota
 	MemJoin   Membership = iota
 	MemLeave  Membership = iota
 )
 
 type User struct {
-	ID       string     // B
-	Name     string     // B
-	DispName string     // B
-	Power    int        // B
-	Mem      Membership // B
+	ID       string
+	Name     string
+	DispName string
+	Power    int
+	Mem      Membership
 	UI       interface{}
 }
 
@@ -42,9 +42,9 @@ func (u *User) String() string {
 }
 
 // If myUserID != "", update the room display name
-func (u *User) UpdateDispName(r *Room, myUserID string) {
+func (u *User) updateDispName(r *Room, myUserID string) {
 	if myUserID != "" {
-		defer r.UpdateDispName(myUserID)
+		defer r.updateDispName(myUserID)
 	}
 	//defer func() {
 	//	u.DispNameHash = adler32.Checksum([]byte(u.DispName))
@@ -62,19 +62,37 @@ func (u *User) UpdateDispName(r *Room, myUserID string) {
 }
 
 type Users struct {
-	U      []*User            // B
-	ByID   map[string]*User   // B
-	ByName map[string][]*User // B
+	U      []*User
+	ByID   map[string]*User
+	ByName map[string][]*User
+	Room   *Room
 }
 
-func NewUsers() (us Users) {
+func newUsers(r *Room) (us Users) {
 	us.U = make([]*User, 0)
 	us.ByID = make(map[string]*User, 0)
 	us.ByName = make(map[string][]*User, 0)
+	us.Room = r
 	return us
 }
 
-func (us *Users) Add(id, name string, power int, mem Membership) *User {
+func (us *Users) Add(id, name string, power int, mem Membership) (*User, error) {
+	u, err := us.AddBatch(id, name, power, mem)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range us.U {
+		u.updateDispName(us.Room, *us.Room.myUserID)
+	}
+	us.Room.updateDispName(*us.Room.myUserID)
+	us.Room.Rooms.call.AddUser(us.Room, u)
+	return u, nil
+}
+
+func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, error) {
+	if us.ByID[id] != nil {
+		return nil, fmt.Errorf("User %v already exists in this room", id)
+	}
 	u := &User{
 		ID:       id,
 		Name:     name,
@@ -90,40 +108,52 @@ func (us *Users) Add(id, name string, power int, mem Membership) *User {
 		}
 		us.ByName[u.Name] = append(us.ByName[u.Name], u)
 	}
-	return u
+	return u, nil
 }
 
-func (us *Users) Del(u User) {
+func (us *Users) AddBatchFinish() {
+	for _, u := range us.U {
+		u.updateDispName(us.Room, "")
+		us.Room.Rooms.call.AddUser(us.Room, u)
+	}
+	us.Room.updateDispName(*us.Room.myUserID)
+}
+
+func (us *Users) Del(u *User) {
 	// TODO
 	// TODO: What if there are two users with the same name?
 }
 
-func (us *Users) SetUserName(u User, name string) {
+func (us *Users) SetUserName(u *User, name string) {
 	// TODO
 	// TODO: What if there are two users with the same name?
 }
 
 type Room struct {
-	ID         string     // B
-	Name       string     // B
-	DispName   string     // B
-	CanonAlias string     // B
-	Topic      string     // B
-	Users      Users      // B
-	Msgs       *list.List // B
-	myUserID   *string
-	UI         interface{}
+	ID         string
+	Name       string
+	DispName   string
+	CanonAlias string
+	Topic      string
+	Users      Users
+	Msgs       *list.List
+	// TODO: Add mutex to manipulate Msgs
+	myUserID *string
+
+	Rooms *Rooms
+	UI    interface{}
 }
 
-func NewRoom(id, name, canonAlias, topic string) (r *Room) {
+func NewRoom(rs *Rooms, id, name, canonAlias, topic string) (r *Room) {
 	r = &Room{}
 	r.ID = id
 	r.Name = name
 	r.CanonAlias = canonAlias
 	r.Topic = topic
-	r.Users = NewUsers()
+	r.Users = newUsers(r)
 	//r.Msgs = make([]Message, 0)
 	r.Msgs = list.New()
+	r.Rooms = rs
 	return r
 }
 
@@ -131,7 +161,7 @@ func (r *Room) String() string {
 	return r.DispName
 }
 
-func (r *Room) UpdateDispName(myUserID string) {
+func (r *Room) updateDispName(myUserID string) {
 	if r.Name != "" {
 		r.DispName = r.Name
 		return
@@ -165,31 +195,6 @@ func (r *Room) UpdateDispName(myUserID string) {
 	r.DispName = "Emtpy room"
 }
 
-func (r *Room) AddUser(userID, username string, power int, membership Membership) (*User, error) {
-	//r, ok := rs.ByID[roomID]
-	//if !ok {
-	//	return nil, fmt.Errorf("Room %v doesn't exist", roomID)
-	//}
-	u := r.Users.Add(userID, username, power, membership)
-	for _, u := range r.Users.U {
-		u.UpdateDispName(r, *r.myUserID)
-	}
-	r.UpdateDispName(*r.myUserID)
-	return u, nil
-}
-
-func (r *Room) AddUserBatch(userID, username string, power int, membership Membership) error {
-	r.Users.Add(userID, username, power, membership)
-	return nil
-}
-
-func (r *Room) AddUserBatchFinish() {
-	for _, u := range r.Users.U {
-		u.UpdateDispName(r, "")
-	}
-	r.UpdateDispName(*r.myUserID)
-}
-
 //func (r *Room) AddMessage(msgType string, ts int64, userID, body string) error {
 //	//_, ok = r.Users.ByID[userID]
 //	//if !ok {
@@ -210,20 +215,34 @@ func (r *Room) AddUserBatchFinish() {
 //	return nil
 //}
 
+type Callbacks struct {
+	AddUser    func(r *Room, u *User)
+	DelUser    func(r *Room, u *User)
+	UpdateUser func(r *Room, u *User)
+
+	AddRoom    func(r *Room)
+	DelRoom    func(r *Room)
+	UpdateRoom func(r *Room)
+}
+
 type Rooms struct {
-	R                  []*Room            // B
-	ByID               map[string]*Room   // B
-	ByName             map[string][]*Room // B
-	ConsoleRoom        *Room              // B
+	R                  []*Room
+	ByID               map[string]*Room
+	ByName             map[string][]*Room
+	ConsoleRoom        *Room
 	consoleRoomID      string
 	ConsoleDisplayName string
 	ConsoleUserID      string
+
+	call Callbacks
+	UI   interface{}
 }
 
-func NewRooms() (rs Rooms) {
+func NewRooms(call Callbacks) (rs Rooms) {
 	rs.R = make([]*Room, 0)
 	rs.ByID = make(map[string]*Room, 0)
 	rs.ByName = make(map[string][]*Room, 0)
+	rs.call = call
 	return rs
 }
 
@@ -232,9 +251,9 @@ func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (
 	if ok {
 		return nil, fmt.Errorf("Room %v already exists", roomID)
 	}
-	r := NewRoom(roomID, name, canonAlias, topic)
+	r := NewRoom(rs, roomID, name, canonAlias, topic)
 	r.myUserID = myUserID
-	r.UpdateDispName(*r.myUserID)
+	r.updateDispName(*r.myUserID)
 	rs.R = append(rs.R, r)
 	rs.ByID[r.ID] = r
 	if r.Name != "" {
@@ -243,6 +262,7 @@ func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (
 		}
 		rs.ByName[r.Name] = append(rs.ByName[r.Name], r)
 	}
+	rs.call.AddRoom(r)
 	return r, nil
 }
 
@@ -273,5 +293,5 @@ func (rs *Rooms) SetRoomName(r Room, name string) {
 }
 
 func (rs *Rooms) AddConsoleMessage(body string) {
-	rs.ConsoleRoom.Msgs.PushBack(Message{"m.text", time.Now().Unix() * 1000, ConsoleUserID, body})
+	rs.ConsoleRoom.Msgs.PushBack(Message{"m.text", time.Now().Unix() * 1000, rs.ConsoleUserID, body})
 }

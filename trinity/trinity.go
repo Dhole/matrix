@@ -20,6 +20,16 @@ type RGBColor struct {
 
 type Words []string
 
+type RoomMessage struct {
+	Room    *mor.Room
+	Message *mor.Message
+}
+
+type Args struct {
+	Room *mor.Room
+	Args []string
+}
+
 type UserUI struct {
 	DispNameHash uint32
 }
@@ -110,10 +120,10 @@ var readlineHeight int = 1
 var displayNamesID = false
 
 // Callbacks
-var callSendText func(roomID, body string)
-var callJoinRoom func(roomIDorAlias string)
-var callLeaveRoom func(roomID string)
-var callQuit func()
+//var callSendText func(roomID, body string)
+//var callJoinRoom func(roomIDorAlias string)
+//var callLeaveRoom func(roomID string)
+//var callQuit func()
 
 // END CONFIG
 
@@ -141,8 +151,10 @@ var viewMsgsLines int
 var scrollBottom bool
 
 // eventLoop channels
+var recvMsgChan chan RoomMessage
 var rePrintChan chan string
 var switchRoomChan chan bool
+var cmdChan chan Args
 
 var started bool
 
@@ -261,7 +273,7 @@ func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 		v.SetOrigin(0, 0)
 		v.SetCursor(0, 0)
 		if len(body) != 0 {
-			sendMsg(body, currentRoom)
+			sendText(body, currentRoom)
 		}
 	}
 }
@@ -270,33 +282,6 @@ func readMultiLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 	// TODO
 	readLine(v, key, ch, mod)
 }
-
-//func SetMyDisplayName(username string) {
-//	myDisplayName = username
-//}
-
-//func SetMyUserID(userID string) {
-//	myUserID = userID
-//}
-//
-//func SetCallSendText(call func(roomID, body string)) {
-//	callSendText = call
-//}
-//
-//func SetCallJoinRoom(call func(roomIDorAlias string)) {
-//	callJoinRoom = call
-//}
-//
-//func SetCallLeaveRoom(call func(roomID string)) {
-//	callLeaveRoom = call
-//}
-//
-//func SetCallQuit(call func()) {
-//	callQuit = call
-//}
-
-//func AddRoom()
-//rs.UpdateShortcuts()
 
 //func AddUser(roomID, userID, username string, power int, membership Membership) error {
 //	if started {
@@ -416,12 +401,12 @@ func eventLoop(g *gocui.Gui) {
 		//		// TODO: Show the message temorarily until we
 		//		// get echoed by the server
 		//	}
-		case mr := <-cli.RecvMsgsChan:
-			//appendRoomMsg(g, mr.Room, mr.Message)
+		case rm := <-recvMsgChan:
+			//appendRoomMsg(g, rm.Room, rm.Message)
 			g.Execute(func(g *gocui.Gui) error {
 				viewMsgs, _ := g.View("msgs")
-				if mr.Room == currentRoom {
-					printMessage(viewMsgs, mr.Message, mr.Room)
+				if rm.Room == currentRoom {
+					printMessage(viewMsgs, rm.Message, rm.Room)
 					if scrollBottom {
 						scrollViewMsgsBottom(g)
 					}
@@ -489,7 +474,7 @@ func eventLoop(g *gocui.Gui) {
 //	}
 //}
 
-func roomIDCmd(args mor.Args) string {
+func roomIDCmd(args Args) string {
 	if len(args.Args) == 2 {
 		return args.Args[1]
 	} else if len(args.Args) == 1 {
@@ -501,7 +486,7 @@ func roomIDCmd(args mor.Args) string {
 
 func cmdLoop(g *gocui.Gui) {
 	for {
-		args := <-cli.CmdChan
+		args := <-cmdChan
 		switch args.Args[0] {
 		case "quit":
 			g.Execute(quit)
@@ -548,7 +533,7 @@ func cmdLoop(g *gocui.Gui) {
 }
 
 //func consoleReply(rep string) {
-//	RecvMsgsChan <- MessageRoom{
+//	RecvMsgsChan <- RoomMessage{
 //		&Message{"m.text", time.Now().Unix() * 1000, ConsoleUserID, rep},
 //		rs.ConsoleRoom}
 //}
@@ -561,6 +546,7 @@ func AddedUser(r *mor.Room, u *mor.User) {
 func DeletedUser(r *mor.Room, u *mor.User) {
 	if started {
 		UpdateShortcuts(&cli.Rs)
+		rePrintChan <- "rooms"
 		if currentRoom == r {
 			rePrintChan <- "users"
 			rePrintChan <- "statusline"
@@ -572,10 +558,13 @@ func UpdatedUser(r *mor.Room, u *mor.User) {
 	uUI := getUserUI(u)
 	uUI.DispNameHash = adler32.Checksum([]byte(u.DispName))
 	if started {
-		UpdateShortcuts(&cli.Rs)
 		if currentRoom == r {
 			rePrintChan <- "users"
 			rePrintChan <- "statusline"
+		}
+		if len(r.Users.U) <= 3 {
+			UpdateShortcuts(&cli.Rs)
+			rePrintChan <- "rooms"
 		}
 	}
 }
@@ -593,6 +582,16 @@ func DeletedRoom(r *mor.Room) {
 
 	if started {
 		UpdateShortcuts(&cli.Rs)
+		if currentRoom == r {
+			if lastRoom != r {
+				currentRoom = lastRoom
+			} else {
+				currentRoom = cli.Rs.ConsoleRoom
+			}
+			rePrintChan <- "all"
+		} else {
+			rePrintChan <- "rooms"
+		}
 	}
 }
 
@@ -606,11 +605,27 @@ func UpdatedRoom(r *mor.Room) {
 	}
 }
 
+func ArrvdMessage(r *mor.Room, m *mor.Message) {
+	if started {
+		if currentRoom == r {
+			recvMsgChan <- RoomMessage{r, m}
+		}
+	}
+}
+
+func Cmd(r *mor.Room, args []string) {
+	if started {
+		cmdChan <- Args{r, args}
+	}
+}
+
 func main() {
 	var err error
 	cli, err = mor.NewClient("morpheus", []string{"."}, mor.Callbacks{
 		AddedUser, DeletedUser, UpdatedUser,
 		AddedRoom, DeletedRoom, UpdatedRoom,
+		ArrvdMessage,
+		Cmd,
 	})
 	if err != nil {
 		panic(err)
@@ -683,11 +698,11 @@ func main() {
 	// PgUp / PgDn: scroll text in current buffer
 
 	// Initialize eventLoop channels
-	//sentMsgsChan = make(chan MessageRoom, 16)
-	//RecvMsgsChan = make(chan MessageRoom, 16)
+	//sentMsgsChan = make(chan RoomMessage, 16)
+	recvMsgChan = make(chan RoomMessage, 16)
 	rePrintChan = make(chan string, 16)
 	switchRoomChan = make(chan bool, 16)
-	//cmdChan = make(chan Args, 16)
+	cmdChan = make(chan Args, 16)
 
 	go eventLoop(g)
 	go cmdLoop(g)
@@ -701,7 +716,6 @@ func main() {
 			exit <- nil
 		}
 	}()
-	started = true
 
 	go func() {
 		time.Sleep(time.Duration(30) * time.Second)
@@ -768,7 +782,8 @@ func layout(g *gocui.Gui) error {
 		winNewSize = true
 	}
 	if winNewSize {
-		if maxX < 2+viewRoomsWidth+timelineUserWidth+viewMsgsMinWidth+viewUsersWidth || maxY < 16 {
+		if maxX < 2+viewRoomsWidth+timelineUserWidth+viewMsgsMinWidth+viewUsersWidth ||
+			maxY < 16 {
 			v, err := g.SetView("err_win", -1, -1, maxX, maxY)
 			if err != nil {
 				if err != gocui.ErrUnknownView {
@@ -789,7 +804,10 @@ func layout(g *gocui.Gui) error {
 		//fmt.Fprintln(debugBuf, "New Size at", time.Now())
 		viewMsgs, _ := g.View("msgs")
 		printRoomMessages(viewMsgs, currentRoom)
-
+		cli.SetMinMsgs(uint(maxY * 3))
+	}
+	if !started {
+		started = true
 	}
 	return nil
 }
@@ -890,8 +908,8 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	v.Clear()
 	viewMsgsLines = 0
 	for e := r.Msgs.Front(); e != nil; e = e.Next() {
-		m := e.Value.(mor.Message)
-		printMessage(v, &m, r)
+		m := e.Value.(*mor.Message)
+		printMessage(v, m, r)
 	}
 }
 
@@ -958,9 +976,16 @@ func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
 	fmt.Fprint(v, t.Format("15:04:05"), " ", username, " ")
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth
-	body := strings.Replace(m.Body, "\x1b", "\\x1b", -1)
+	text := ""
+	switch m.MsgType {
+	case "m.text":
+		text = m.Content.(mor.TextMessage).Body
+	default:
+		text = fmt.Sprintf("msgtype %s not supported yet", m.MsgType)
+	}
+	text = strings.Replace(text, "\x1b", "\\x1b", -1)
 	lines := 0
-	for i, l := range strings.Split(body, "\n") {
+	for i, l := range strings.Split(text, "\n") {
 		strLen := 0
 		if i != 0 {
 			fmt.Fprint(v, timeLineSpace)
@@ -1013,7 +1038,7 @@ func quit(g *gocui.Gui) error {
 	// DEBUG
 	// panicing for now because it hangs
 	//panic("quit")
-	cli.StopSync()
+	go cli.StopSync()
 	return gocui.ErrQuit
 }
 
@@ -1039,7 +1064,7 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 	return nil
 }
 
-func sendMsg(body string, r *mor.Room) error {
+func sendText(body string, r *mor.Room) error {
 	go cli.SendText(r.ID, body)
 	return nil
 }

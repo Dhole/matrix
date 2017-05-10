@@ -15,9 +15,14 @@ const (
 
 type Message struct {
 	MsgType string
+	ID      string
 	Ts      int64
 	UserID  string
-	Body    string
+	Content interface{}
+}
+
+type TextMessage struct {
+	Body string
 }
 
 type Membership int
@@ -43,12 +48,15 @@ func (u *User) String() string {
 
 // If myUserID != "", update the room display name
 func (u *User) updateDispName(r *Room, myUserID string) {
+	prevDispName := u.DispName
+	defer func() {
+		if u.DispName != prevDispName {
+			r.Rooms.call.UpdateUser(r, u)
+		}
+	}()
 	if myUserID != "" {
 		defer r.updateDispName(myUserID)
 	}
-	//defer func() {
-	//	u.DispNameHash = adler32.Checksum([]byte(u.DispName))
-	//}()
 	if u.Name == "" {
 		u.DispName = u.ID
 		return
@@ -62,8 +70,10 @@ func (u *User) updateDispName(r *Room, myUserID string) {
 }
 
 type Users struct {
-	U      []*User
-	ByID   map[string]*User
+	U []*User
+	// TODO: Concurrent write and/or read is not ok
+	ByID map[string]*User
+	// TODO: Concurrent write and/or read is not ok
 	ByName map[string][]*User
 	Room   *Room
 }
@@ -81,11 +91,11 @@ func (us *Users) Add(id, name string, power int, mem Membership) (*User, error) 
 	if err != nil {
 		return nil, err
 	}
+	us.Room.Rooms.call.AddUser(us.Room, u)
 	for _, u := range us.U {
 		u.updateDispName(us.Room, *us.Room.myUserID)
 	}
 	us.Room.updateDispName(*us.Room.myUserID)
-	us.Room.Rooms.call.AddUser(us.Room, u)
 	return u, nil
 }
 
@@ -113,8 +123,8 @@ func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, er
 
 func (us *Users) AddBatchFinish() {
 	for _, u := range us.U {
-		u.updateDispName(us.Room, "")
 		us.Room.Rooms.call.AddUser(us.Room, u)
+		u.updateDispName(us.Room, "")
 	}
 	us.Room.updateDispName(*us.Room.myUserID)
 }
@@ -122,11 +132,13 @@ func (us *Users) AddBatchFinish() {
 func (us *Users) Del(u *User) {
 	// TODO
 	// TODO: What if there are two users with the same name?
+	us.Room.Rooms.call.DelUser(us.Room, u)
 }
 
 func (us *Users) SetUserName(u *User, name string) {
 	// TODO
 	// TODO: What if there are two users with the same name?
+	us.Room.Rooms.call.UpdateUser(us.Room, u)
 }
 
 type Room struct {
@@ -162,6 +174,12 @@ func (r *Room) String() string {
 }
 
 func (r *Room) updateDispName(myUserID string) {
+	prevDispName := r.DispName
+	defer func() {
+		if r.DispName != prevDispName {
+			r.Rooms.call.UpdateRoom(r)
+		}
+	}()
 	if r.Name != "" {
 		r.DispName = r.Name
 		return
@@ -195,25 +213,56 @@ func (r *Room) updateDispName(myUserID string) {
 	r.DispName = "Emtpy room"
 }
 
-//func (r *Room) AddMessage(msgType string, ts int64, userID, body string) error {
-//	//_, ok = r.Users.ByID[userID]
-//	//if !ok {
-//	//	// We tolerate messages from non existing users.  We take care
-//	//	// in printMessage of that case
-//	//	AddConsoleMessage(fmt.Sprintf("AddMessage: User %v doesn't exist in room %v",
-//	//		userID, roomID))
-//	//}
-//	m := Message{msgType, ts, userID, body}
-//	r.Msgs.PushBack(m)
-//	return nil
-//}
+func parseMessage(msgType string, content map[string]interface{}) (interface{}, error) {
+	var cnt interface{}
+	switch msgType {
+	case "m.text":
+		var cm TextMessage
+		body, ok := content["body"].(string)
+		if !ok {
+			return nil, fmt.Errorf("Error decoding msgtype %s with content %+v",
+				msgType, content)
+		}
+		cm.Body = body
+		cnt = cm
+	default:
+		return nil, fmt.Errorf("msgtype %s not supported yet", msgType)
+	}
+	return cnt, nil
+}
 
-//func (r *Rooms) PushFrontMessage(msgType string, ts int64, userID, body string) error {
-//	m := Message{msgType, ts, userID, body}
-//	// Deliberately doesn't reprint the room because this is DEBUG
-//	r.Msgs.PushFront(m)
-//	return nil
-//}
+func (r *Room) AddMessage(msgType, id string, ts int64, userID string,
+	content map[string]interface{}) error {
+
+	cnt, err := parseMessage(msgType, content)
+	if err != nil {
+		return err
+	}
+	// TODO: Convert content into a struct.  Have convert as map[string]interface{}
+	m := &Message{msgType, id, ts, userID, cnt}
+	r.Msgs.PushBack(m)
+	r.Rooms.call.ArrvMessage(r, m)
+	return nil
+}
+
+func (r *Room) AddTextMessage(id string, ts int64, userID, body string) error {
+	m := &Message{"m.text", id, ts, userID, TextMessage{body}}
+	r.Msgs.PushBack(m)
+	r.Rooms.call.ArrvMessage(r, m)
+	return nil
+}
+
+func (r *Room) PushFrontMessage(msgType, id string, ts int64, userID string,
+	content map[string]interface{}) error {
+
+	cnt, err := parseMessage(msgType, content)
+	if err != nil {
+		return err
+	}
+	m := &Message{msgType, id, ts, userID, cnt}
+	r.Msgs.PushFront(m)
+	return nil
+}
 
 type Callbacks struct {
 	AddUser    func(r *Room, u *User)
@@ -223,11 +272,17 @@ type Callbacks struct {
 	AddRoom    func(r *Room)
 	DelRoom    func(r *Room)
 	UpdateRoom func(r *Room)
+
+	ArrvMessage func(r *Room, m *Message)
+
+	Cmd func(r *Room, args []string)
 }
 
 type Rooms struct {
-	R                  []*Room
-	ByID               map[string]*Room
+	R []*Room
+	// TODO: Concurrent write and/or read is not ok
+	ByID map[string]*Room
+	// TODO: Concurrent write and/or read is not ok
 	ByName             map[string][]*Room
 	ConsoleRoom        *Room
 	consoleRoomID      string
@@ -283,15 +338,22 @@ func (rs *Rooms) Del(roomID string) (*Room, error) {
 		newR = append(newR, room)
 	}
 	rs.R = newR
-	//rs.UpdateShortcuts()
+	rs.call.DelRoom(r)
 	return r, nil
 }
 
-func (rs *Rooms) SetRoomName(r Room, name string) {
+func (rs *Rooms) SetRoomName(r *Room, name string) {
 	// TODO
 	// TODO: What if there are two rooms with the same name?
+	rs.call.UpdateRoom(r)
 }
 
-func (rs *Rooms) AddConsoleMessage(body string) {
-	rs.ConsoleRoom.Msgs.PushBack(Message{"m.text", time.Now().Unix() * 1000, rs.ConsoleUserID, body})
+func (rs *Rooms) AddConsoleMessage(msgType string, content map[string]interface{}) error {
+	return rs.ConsoleRoom.AddMessage(msgType, "1", time.Now().Unix()*1000,
+		rs.ConsoleUserID, content)
+}
+
+func (rs *Rooms) AddConsoleTextMessage(body string) error {
+	return rs.ConsoleRoom.AddTextMessage("1", time.Now().Unix()*1000,
+		rs.ConsoleUserID, body)
 }

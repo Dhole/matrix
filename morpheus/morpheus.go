@@ -36,6 +36,24 @@ func (m *GenMap) StringKey(k string) string {
 	return v
 }
 
+func appendRoomEvents(r *Room, events []gomatrix.Event) {
+	for _, ev := range events {
+		if msgType, ok := ev.MessageType(); ok {
+			r.AddMessage(msgType, ev.ID, int64(ev.Timestamp),
+				ev.Sender, ev.Content)
+		}
+	}
+}
+
+func prependRoomEvents(r *Room, events []gomatrix.Event) {
+	for _, ev := range events {
+		if msgType, ok := ev.MessageType(); ok {
+			r.PushFrontMessage(msgType, ev.ID, int64(ev.Timestamp),
+				ev.Sender, ev.Content)
+		}
+	}
+}
+
 // TODO: Remove this function and get room data from the state returned by the initial sync!
 func (c *Client) loadRoomAndData(roomID string) {
 	res := NewGenMap()
@@ -45,8 +63,8 @@ func (c *Client) loadRoomAndData(roomID string) {
 	topic := res.StringKey("topic")
 	c.cli.StateEvent(roomID, "m.room.canonical_alias", "", &res)
 	canonicalAlias := res.StringKey("alias")
-	c.ConsolePrintf("Adding room (%s) \"%s\" | \"%s\": %s",
-		roomID, name, canonicalAlias, topic)
+	c.ConsolePrintf("Adding room (%s) %s \"%s\": %s",
+		roomID, canonicalAlias, name, topic)
 	r, _ := c.AddRoom(roomID, name, canonicalAlias, topic)
 	resJoinedMem, err := c.cli.JoinedMembers(roomID)
 	if err != nil {
@@ -78,21 +96,11 @@ func (c *Client) AddRoom(roomID, name, canonAlias, topic string) (*Room, error) 
 }
 
 func (c *Client) ConsolePrintf(format string, args ...interface{}) {
-	c.Rs.AddConsoleMessage(fmt.Sprintf(format, args...))
+	c.Rs.AddConsoleTextMessage(fmt.Sprintf(format, args...))
 }
 
 func (c *Client) ConsolePrint(args ...interface{}) {
-	c.Rs.AddConsoleMessage(fmt.Sprint(args...))
-}
-
-type MessageRoom struct {
-	Message *Message
-	Room    *Room
-}
-
-type Args struct {
-	Room *Room
-	Args []string
+	c.Rs.AddConsoleTextMessage(fmt.Sprint(args...))
 }
 
 type Client struct {
@@ -100,11 +108,11 @@ type Client struct {
 	cfg      Config
 	Rs       Rooms
 	DebugBuf *bytes.Buffer
-	exit     chan error
+	minMsgs  uint
+
+	exit chan error
 
 	//	sentMsgsChan chan MessageRoom
-	RecvMsgsChan chan MessageRoom
-	CmdChan      chan Args
 }
 
 func NewClient(configName string, configPaths []string, call Callbacks) (*Client, error) {
@@ -136,10 +144,9 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	//ui.Init()
 	//ui.SetMyDisplayName(c.cfg.DisplayName)
 	//ui.SetMyUserID(c.cfg.UserID)
-	c.RecvMsgsChan = make(chan MessageRoom, 128)
-	c.CmdChan = make(chan Args, 16)
 
 	c.DebugBuf = bytes.NewBufferString("")
+	c.minMsgs = 50
 	cli, _ := gomatrix.NewClient(c.cfg.Homeserver, "", "")
 	c.cli = cli
 
@@ -161,9 +168,14 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 // TODO: Handle error, maybe hold message if unsuccesful
 func (c *Client) SendText(roomID, body string) {
 	if roomID == c.Rs.consoleRoomID || body[0] == '/' {
-		c.Rs.ConsoleRoom.Msgs.PushBack(Message{"m.text",
-			time.Now().Unix() * 1000, c.cfg.UserID, body})
-		// TODO: Send command back to ui (cmdChan)
+		c.Rs.ConsoleRoom.AddTextMessage("1", time.Now().Unix()*1000,
+			c.cfg.UserID, body)
+		body = strings.TrimPrefix(body, "/")
+		args := strings.Fields(body)
+		if len(args) < 1 {
+			return
+		}
+		c.Rs.call.Cmd(c.Rs.ByID[roomID], args)
 	} else {
 		_, err := c.cli.SendText(roomID, body)
 		if err != nil {
@@ -197,7 +209,7 @@ func (c *Client) LeaveRoom(roomID string) {
 		c.ConsolePrint("leave:", err)
 		return
 	}
-	c.ConsolePrint("Left room (%s) \"%s\"", roomID, r.DispName)
+	c.ConsolePrintf("Left room (%s) %s", roomID, r.DispName)
 	// TODO: Notify UI of left room
 }
 
@@ -239,42 +251,25 @@ func (c *Client) Sync() error {
 		if !ok {
 			continue
 		}
-		for _, ev := range roomHist.Timeline.Events {
-			body, ok := ev.Body()
-			if ok {
-				r.Msgs.PushBack(Message{ev.Type, int64(ev.Timestamp),
-					ev.Sender, body})
-			}
-			//else {
-			//	ui.AddConsoleMessage(fmt.Sprintf("%+v", ev))
-			//}
-		}
+		appendRoomEvents(r, roomHist.Timeline.Events)
 		// Fetch a few previous messages
-		//start := roomHist.Timeline.PrevBatch
-		//end := ""
-		//count := 0
-		//for {
-		//	resMessages, err := cli.Messages(roomID, start, end, 'b', 0)
-		//	if err != nil {
-		//		fmt.Println(err)
-		//		break
-		//	}
-		//	if len(resMessages.Chunk) == 0 {
-		//		break
-		//	}
-		//	for _, ev := range resMessages.Chunk {
-		//		body, ok := ev.Body()
-		//		if ok {
-		//			count++
-		//			PushFrontMessage(roomID, ev.Type,
-		//				int64(ev.Timestamp/1000), ev.Sender, body)
-		//		}
-		//	}
-		//	if count >= 50 {
-		//		break
-		//	}
-		//	start = resMessages.End
-		//}
+		start := roomHist.Timeline.PrevBatch
+		end := ""
+		for {
+			resMessages, err := c.cli.Messages(roomID, start, end, 'b', 0)
+			if err != nil {
+				fmt.Println(err)
+				break
+			}
+			if len(resMessages.Chunk) == 0 {
+				break
+			}
+			prependRoomEvents(r, resMessages.Chunk)
+			if uint(r.Msgs.Len()) >= c.minMsgs {
+				break
+			}
+			start = resMessages.End
+		}
 
 		// TODO: Populate rooms state
 		// NOTE: Don't display state events in the timeline
@@ -299,19 +294,17 @@ func (c *Client) Sync() error {
 	syncer := c.cli.Syncer.(*gomatrix.DefaultSyncer)
 	syncer.OnEventType("m.room.message", func(ev *gomatrix.Event) {
 		//fmt.Println("Message: ", ev)
-		msgType, ok := ev.Body()
-		if !ok {
-			msgType = "?"
-		}
-		body, ok := ev.Body()
-		if !ok {
-			body = "???"
-		}
 		r := c.Rs.ByID[ev.RoomID]
 		if r != nil {
-			m := &Message{msgType, int64(ev.Timestamp), ev.Sender, body}
-			r.Msgs.PushBack(m)
-			c.RecvMsgsChan <- MessageRoom{m, r}
+			if ev.Type == "m.room.message" {
+				msgType, ok := ev.Content["msgtype"].(string)
+				if !ok {
+					return
+				}
+				r.AddMessage(msgType, ev.ID, int64(ev.Timestamp),
+					ev.Sender, ev.Content)
+				//c.RecvMsgsChan <- MessageRoom{m, r}
+			}
 		} else {
 			fmt.Fprintf(c.DebugBuf,
 				"Received message for room %v, which doesn't exist", ev.RoomID)
@@ -330,4 +323,8 @@ func (c *Client) Sync() error {
 // TODO: Actually stop the c.cli.Sync()
 func (c *Client) StopSync() {
 	c.exit <- nil
+}
+
+func (c *Client) SetMinMsgs(n uint) {
+	c.minMsgs = n
 }

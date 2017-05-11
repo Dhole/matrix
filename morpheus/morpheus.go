@@ -39,19 +39,48 @@ func (m *GenMap) StringKey(k string) string {
 func appendRoomEvents(r *Room, events []gomatrix.Event) {
 	for _, ev := range events {
 		if msgType, ok := ev.MessageType(); ok {
-			r.AddMessage(msgType, ev.ID, int64(ev.Timestamp),
+			r.PushMessage(msgType, ev.ID, int64(ev.Timestamp),
 				ev.Sender, ev.Content)
 		}
 	}
 }
 
-func prependRoomEvents(r *Room, events []gomatrix.Event) {
+func prependRoomEvents(r *Room, events []gomatrix.Event) uint {
+	count := uint(0)
 	for _, ev := range events {
 		if msgType, ok := ev.MessageType(); ok {
-			r.PushFrontMessage(msgType, ev.ID, int64(ev.Timestamp),
-				ev.Sender, ev.Content)
+			if err := r.PushFrontMessage(msgType, ev.ID, int64(ev.Timestamp),
+				ev.Sender, ev.Content); err == nil {
+				count++
+			}
 		}
 	}
+	return count
+}
+
+func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
+	count := uint(0)
+	start := string(r.Msgs.Front().Value.(Token))
+	end := ""
+	//for {
+	resMessages, err := c.cli.Messages(r.ID, start, end, 'b', int(num))
+	if err != nil {
+		return 0, err
+	}
+	if len(resMessages.Chunk) < int(num) {
+		r.HasFirstMsg = true
+		if len(resMessages.Chunk) == 0 {
+			return 0, nil
+		}
+	}
+	count += prependRoomEvents(r, resMessages.Chunk)
+	r.PushFrontToken(resMessages.End)
+	//if count >= num {
+	//	break
+	//}
+	//start = resMessages.End
+	//}
+	return count, nil
 }
 
 // TODO: Remove this function and get room data from the state returned by the initial sync!
@@ -155,6 +184,7 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	c.Rs.ConsoleDisplayName = ConsoleDisplayName
 	c.Rs.ConsoleUserID = ConsoleUserID
 	r, _ := c.AddRoom(c.Rs.consoleRoomID, "Console", "", "")
+	r.HasFirstMsg = true
 	r.Users.Add(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
 	r.Users.Add(c.cfg.UserID, c.cfg.DisplayName, 0, MemJoin)
 	c.Rs.ConsoleRoom = c.Rs.ByID[c.Rs.consoleRoomID]
@@ -168,7 +198,7 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 // TODO: Handle error, maybe hold message if unsuccesful
 func (c *Client) SendText(roomID, body string) {
 	if roomID == c.Rs.consoleRoomID || body[0] == '/' {
-		c.Rs.ConsoleRoom.AddTextMessage("1", time.Now().Unix()*1000,
+		c.Rs.ConsoleRoom.PushTextMessage(txnID(), time.Now().Unix()*1000,
 			c.cfg.UserID, body)
 		body = strings.TrimPrefix(body, "/")
 		args := strings.Fields(body)
@@ -252,30 +282,18 @@ func (c *Client) Sync() error {
 			continue
 		}
 		appendRoomEvents(r, roomHist.Timeline.Events)
+		r.HasLastMsg = true
 		// Fetch a few previous messages
-		start := roomHist.Timeline.PrevBatch
-		end := ""
-		for {
-			resMessages, err := c.cli.Messages(roomID, start, end, 'b', 0)
-			if err != nil {
-				fmt.Println(err)
-				break
-			}
-			if len(resMessages.Chunk) == 0 {
-				break
-			}
-			prependRoomEvents(r, resMessages.Chunk)
-			if uint(r.Msgs.Len()) >= c.minMsgs {
-				break
-			}
-			start = resMessages.End
-		}
+		r.PushFrontToken(roomHist.Timeline.PrevBatch)
+		// DEBUG
+		c.GetPrevEvents(r, c.minMsgs)
 
 		// TODO: Populate rooms state
 		// NOTE: Don't display state events in the timeline
 		//for _, ev := range roomHist.State.Events {
 		//}
 	}
+	c.ConsolePrint("Finished loading rooms")
 	// TODO: Populate invited rooms
 	//for roomID, roomHist := range resSync.Rooms.Invite {
 	// NOTE: Don't display state events in the timeline
@@ -301,7 +319,7 @@ func (c *Client) Sync() error {
 				if !ok {
 					return
 				}
-				r.AddMessage(msgType, ev.ID, int64(ev.Timestamp),
+				r.PushMessage(msgType, ev.ID, int64(ev.Timestamp),
 					ev.Sender, ev.Content)
 				//c.RecvMsgsChan <- MessageRoom{m, r}
 			}

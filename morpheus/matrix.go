@@ -4,6 +4,7 @@ import (
 	"../list"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -12,6 +13,12 @@ const (
 	ConsoleDisplayName string = "morpheus"
 	ConsoleRoomID      string = "!console:localhost"
 )
+
+type Token string
+
+func txnID() string {
+	return "go" + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
 
 type Message struct {
 	MsgType string
@@ -142,13 +149,17 @@ func (us *Users) SetUserName(u *User, name string) {
 }
 
 type Room struct {
-	ID         string
-	Name       string
-	DispName   string
-	CanonAlias string
-	Topic      string
-	Users      Users
-	Msgs       *list.List
+	ID          string
+	Name        string
+	DispName    string
+	CanonAlias  string
+	Topic       string
+	Users       Users
+	Msgs        *list.List
+	msgsLen     int
+	tokensLen   int
+	HasFirstMsg bool
+	HasLastMsg  bool
 	// TODO: Add mutex to manipulate Msgs
 	myUserID *string
 
@@ -167,6 +178,10 @@ func NewRoom(rs *Rooms, id, name, canonAlias, topic string) (r *Room) {
 	r.Msgs = list.New()
 	r.Rooms = rs
 	return r
+}
+
+func (r *Room) MsgsLen() int {
+	return r.msgsLen
 }
 
 func (r *Room) String() string {
@@ -231,7 +246,17 @@ func parseMessage(msgType string, content map[string]interface{}) (interface{}, 
 	return cnt, nil
 }
 
-func (r *Room) AddMessage(msgType, id string, ts int64, userID string,
+func (r *Room) PushToken(token string) {
+	r.Msgs.PushBack(Token(token))
+	r.tokensLen++
+}
+
+func (r *Room) PushFrontToken(token string) {
+	r.Msgs.PushFront(Token(token))
+	r.tokensLen++
+}
+
+func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 	content map[string]interface{}) error {
 
 	cnt, err := parseMessage(msgType, content)
@@ -241,13 +266,15 @@ func (r *Room) AddMessage(msgType, id string, ts int64, userID string,
 	// TODO: Convert content into a struct.  Have convert as map[string]interface{}
 	m := &Message{msgType, id, ts, userID, cnt}
 	r.Msgs.PushBack(m)
+	r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, m)
 	return nil
 }
 
-func (r *Room) AddTextMessage(id string, ts int64, userID, body string) error {
+func (r *Room) PushTextMessage(id string, ts int64, userID, body string) error {
 	m := &Message{"m.text", id, ts, userID, TextMessage{body}}
 	r.Msgs.PushBack(m)
+	r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, m)
 	return nil
 }
@@ -261,6 +288,7 @@ func (r *Room) PushFrontMessage(msgType, id string, ts int64, userID string,
 	}
 	m := &Message{msgType, id, ts, userID, cnt}
 	r.Msgs.PushFront(m)
+	r.msgsLen++
 	return nil
 }
 
@@ -349,11 +377,11 @@ func (rs *Rooms) SetRoomName(r *Room, name string) {
 }
 
 func (rs *Rooms) AddConsoleMessage(msgType string, content map[string]interface{}) error {
-	return rs.ConsoleRoom.AddMessage(msgType, "1", time.Now().Unix()*1000,
+	return rs.ConsoleRoom.PushMessage(msgType, txnID(), time.Now().Unix()*1000,
 		rs.ConsoleUserID, content)
 }
 
 func (rs *Rooms) AddConsoleTextMessage(body string) error {
-	return rs.ConsoleRoom.AddTextMessage("1", time.Now().Unix()*1000,
+	return rs.ConsoleRoom.PushTextMessage(txnID(), time.Now().Unix()*1000,
 		rs.ConsoleUserID, body)
 }

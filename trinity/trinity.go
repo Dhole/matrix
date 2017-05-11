@@ -47,6 +47,9 @@ type RoomUI struct {
 	Fav                 bool
 	ViewMsgsOriginY     int
 	ScrollBottom        bool
+	ScrollSkipMsgs      uint
+	ScrollDelta         int
+	GettingPrev         bool
 	ViewReadlineBuf     string
 	ViewReadlineCursorX int
 }
@@ -153,6 +156,7 @@ var scrollBottom bool
 // eventLoop channels
 var recvMsgChan chan RoomMessage
 var rePrintChan chan string
+var scrollChan chan int
 var switchRoomChan chan bool
 var cmdChan chan Args
 
@@ -283,19 +287,6 @@ func readMultiLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 	readLine(v, key, ch, mod)
 }
 
-//func AddUser(roomID, userID, username string, power int, membership Membership) error {
-//	if started {
-//		if r == currentRoom {
-//			rePrintChan <- "users"
-//			rePrintChan <- "statusline"
-//		}
-//		if len(r.Users.U) <= 3 {
-//			rs.UpdateShortcuts()
-//			rePrintChan <- "rooms"
-//		}
-//	}
-//}
-
 // DEBUG
 func initReadline() {
 	readlineBuf = make([]Words, 1)
@@ -303,19 +294,57 @@ func initReadline() {
 	readlineMultiline = false
 }
 
-func scrollViewMsgs(g *gocui.Gui, l int) error {
-	viewMsgs, err := g.View("msgs")
-	if err != nil {
-		return err
-	}
+func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 	_, y := viewMsgs.Origin()
 	newY := 0
-	if l < 0 {
-		newY = max(y+l, 0)
+	if l <= 0 {
+		newY = y + l
+		if newY < 1 {
+			newY = 1
+			roomUI := getRoomUI(currentRoom)
+			if !roomUI.GettingPrev && !currentRoom.HasFirstMsg {
+				newY = 0
+				// TODO: Use a mutex instead of the bool GettingPrev
+				roomUI.GettingPrev = true
+				//cli.ConsolePrint("Requesting old messages...")
+				go func() {
+					room := currentRoom
+					defer func() {
+						roomUI.GettingPrev = false
+					}()
+					roomUI.ScrollDelta = l
+					// Fetch previous messages
+					count, err := cli.GetPrevEvents(currentRoom,
+						uint(viewMsgsHeight*2))
+					if err != nil || count == 0 {
+						//cli.ConsolePrintf("Got %v or 0 prev messages", err)
+						if currentRoom == room {
+							// Ugly hack?
+							scrollChan <- -1
+							scrollChan <- 1
+							rePrintChan <- "msgs"
+						}
+					} else {
+						//cli.ConsolePrint("Got ", count, " prev messages")
+						roomUI.ScrollSkipMsgs += count
+						if currentRoom == room {
+							rePrintChan <- "msgs"
+						}
+					}
+				}()
+			} else if roomUI.GettingPrev {
+				newY = 0
+				roomUI.ScrollDelta = l
+			}
+		}
 	}
 	if l > 0 {
+		roomUI := getRoomUI(currentRoom)
+		if roomUI.GettingPrev {
+			roomUI.ScrollDelta = 0
+		}
 		newY = min(y+l, viewMsgsLines-viewMsgsHeight)
-		newY = max(newY, 0)
+		newY = max(newY, 1)
 	}
 	viewMsgs.SetOrigin(0, newY)
 	if newY >= viewMsgsLines-viewMsgsHeight {
@@ -327,22 +356,12 @@ func scrollViewMsgs(g *gocui.Gui, l int) error {
 }
 
 func scrollViewMsgsBottom(g *gocui.Gui) error {
-	return scrollViewMsgs(g, viewMsgsLines-viewMsgsHeight)
+	viewMsgs, err := g.View("msgs")
+	if err != nil {
+		return err
+	}
+	return scrollViewMsgs(viewMsgs, viewMsgsLines-viewMsgsHeight)
 }
-
-//func appendRoomMsg(g *gocui.Gui, r *Room, m *Message) {
-//	r.Msgs.PushBack(*m)
-//	g.Execute(func(g *gocui.Gui) error {
-//		viewMsgs, _ := g.View("msgs")
-//		if r == currentRoom {
-//			printMessage(viewMsgs, m, r)
-//			if scrollBottom {
-//				scrollViewMsgsBottom(g)
-//			}
-//		}
-//		return nil
-//	})
-//}
 
 func printView(g *gocui.Gui, view string) {
 	views := []string{view}
@@ -416,6 +435,12 @@ func eventLoop(g *gocui.Gui) {
 		case view := <-rePrintChan:
 			g.Execute(func(g *gocui.Gui) error {
 				printView(g, view)
+				return nil
+			})
+		case l := <-scrollChan:
+			g.Execute(func(g *gocui.Gui) error {
+				viewMsgs, _ := g.View("msgs")
+				scrollViewMsgs(viewMsgs, l)
 				return nil
 			})
 		case <-switchRoomChan:
@@ -571,6 +596,9 @@ func UpdatedUser(r *mor.Room, u *mor.User) {
 
 func AddedRoom(r *mor.Room) {
 	initRoomUI(r)
+	roomUI := getRoomUI(r)
+	roomUI.ViewMsgsOriginY = 1
+	roomUI.ScrollBottom = true
 	//rUI := getRoomUI(r)
 	UpdatedRoom(r)
 	if started {
@@ -670,25 +698,41 @@ func main() {
 	}
 	if err := g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, -1)
+			viewMsgs, err := g.View("msgs")
+			if err != nil {
+				return err
+			}
+			return scrollViewMsgs(viewMsgs, -1)
 		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, 1)
+			viewMsgs, err := g.View("msgs")
+			if err != nil {
+				return err
+			}
+			return scrollViewMsgs(viewMsgs, 1)
 		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyPgup, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, -viewMsgsHeight/2)
+			viewMsgs, err := g.View("msgs")
+			if err != nil {
+				return err
+			}
+			return scrollViewMsgs(viewMsgs, -viewMsgsHeight/2)
 		}); err != nil {
 		log.Panicln(err)
 	}
 	if err := g.SetKeybinding("", gocui.KeyPgdn, gocui.ModNone,
 		func(g *gocui.Gui, v *gocui.View) error {
-			return scrollViewMsgs(g, viewMsgsHeight/2)
+			viewMsgs, err := g.View("msgs")
+			if err != nil {
+				return err
+			}
+			return scrollViewMsgs(viewMsgs, viewMsgsHeight/2)
 		}); err != nil {
 		log.Panicln(err)
 	}
@@ -701,6 +745,7 @@ func main() {
 	//sentMsgsChan = make(chan RoomMessage, 16)
 	recvMsgChan = make(chan RoomMessage, 16)
 	rePrintChan = make(chan string, 16)
+	scrollChan = make(chan int, 16)
 	switchRoomChan = make(chan bool, 16)
 	cmdChan = make(chan Args, 16)
 
@@ -804,7 +849,7 @@ func layout(g *gocui.Gui) error {
 		//fmt.Fprintln(debugBuf, "New Size at", time.Now())
 		viewMsgs, _ := g.View("msgs")
 		printRoomMessages(viewMsgs, currentRoom)
-		cli.SetMinMsgs(uint(maxY * 3))
+		cli.SetMinMsgs(uint(viewMsgsHeight * 2))
 	}
 	if !started {
 		started = true
@@ -861,7 +906,9 @@ func setAllViews(g *gocui.Gui) error {
 		}
 		if err == gocui.ErrUnknownView {
 			viewMsgs.Frame = false
-			viewMsgs.Wrap = true
+			// DEBUG
+			//viewMsgs.Wrap = true
+			viewMsgs.SetOrigin(0, 1)
 		}
 	}
 	if _, err := g.View("debug"); err == nil {
@@ -906,10 +953,40 @@ func printRooms(v *gocui.View) {
 
 func printRoomMessages(v *gocui.View, r *mor.Room) {
 	v.Clear()
-	viewMsgsLines = 0
+	viewMsgsWidth, _ := v.Size()
+	prevLine := "--- Fetching previous messages ---"
+	fmt.Fprintln(v, strings.Repeat(" ", viewMsgsWidth/2-len(prevLine)/2),
+		"\x1b[38;5;45m", prevLine, "\x1b[0;0m")
+	viewMsgsLines = 1
+	roomUI := getRoomUI(r)
+	count := uint(0)
+	scrollDelta := 0
+	prevTs := time.Unix(0, 0)
 	for e := r.Msgs.Front(); e != nil; e = e.Next() {
-		m := e.Value.(*mor.Message)
-		printMessage(v, m, r)
+		if m, ok := e.Value.(*mor.Message); ok {
+			ts := time.Unix(m.Ts/1000, 0)
+			if prevTs.Day() != ts.Day() ||
+				prevTs.Month() != ts.Month() ||
+				prevTs.Year() != ts.Year() {
+				date := ts.Format("-- Mon, 02 Jan 2006 --")
+				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;72m", date, "\x1b[0;0m")
+			}
+			prevTs = ts
+			printMessage(v, m, r)
+			count++
+			if count == roomUI.ScrollSkipMsgs {
+				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;29m",
+					strings.Repeat("–", viewMsgsWidth), "\x1b[0;0m")
+				viewMsgsLines++
+				scrollDelta = viewMsgsLines
+			}
+		}
+	}
+	if roomUI.ScrollSkipMsgs != 0 {
+		cli.ConsolePrint("scrollDelta = ", scrollDelta)
+		scrollViewMsgs(v, scrollDelta+roomUI.ScrollDelta)
+		roomUI.ScrollSkipMsgs = 0
+		roomUI.ScrollDelta = 0
 	}
 }
 
@@ -973,7 +1050,7 @@ func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
 	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
 	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
 	//username = fmt.Sprintf("\x1b[38;2;255;0;0m%s\x1b[0;0m", "HOLA")
-	fmt.Fprint(v, t.Format("15:04:05"), " ", username, " ")
+	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[0;0m", " ", username, " ")
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth
 	text := ""

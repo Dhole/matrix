@@ -302,6 +302,7 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 		if newY < 1 {
 			newY = 1
 			roomUI := getRoomUI(currentRoom)
+			l++
 			if !roomUI.GettingPrev && !currentRoom.HasFirstMsg {
 				newY = 0
 				// TODO: Use a mutex instead of the bool GettingPrev
@@ -962,6 +963,7 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	count := uint(0)
 	scrollDelta := 0
 	prevTs := time.Unix(0, 0)
+	prevMsgsBar := false
 	for e := r.Msgs.Front(); e != nil; e = e.Next() {
 		if m, ok := e.Value.(*mor.Message); ok {
 			ts := time.Unix(m.Ts/1000, 0)
@@ -970,6 +972,15 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 				prevTs.Year() != ts.Year() {
 				date := ts.Format("-- Mon, 02 Jan 2006 --")
 				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;72m", date, "\x1b[0;0m")
+				viewMsgsLines++
+			} else if prevMsgsBar {
+				// There was a date at the beginning of the
+				// buffer before, but it's not there after the
+				// previous messages bar
+				scrollDelta--
+			}
+			if prevMsgsBar {
+				prevMsgsBar = false
 			}
 			prevTs = ts
 			printMessage(v, m, r)
@@ -977,13 +988,14 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 			if count == roomUI.ScrollSkipMsgs {
 				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;29m",
 					strings.Repeat("–", viewMsgsWidth), "\x1b[0;0m")
-				viewMsgsLines++
 				scrollDelta = viewMsgsLines
+				viewMsgsLines++
+				prevMsgsBar = true
 			}
 		}
 	}
 	if roomUI.ScrollSkipMsgs != 0 {
-		cli.ConsolePrint("scrollDelta = ", scrollDelta)
+		cli.ConsolePrint("roomUI.ScrollDelta = ", roomUI.ScrollDelta)
 		scrollViewMsgs(v, scrollDelta+roomUI.ScrollDelta)
 		roomUI.ScrollSkipMsgs = 0
 		roomUI.ScrollDelta = 0

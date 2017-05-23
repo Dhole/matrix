@@ -60,7 +60,7 @@ func prependRoomEvents(r *Room, events []gomatrix.Event) uint {
 
 func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 	count := uint(0)
-	start := string(r.Msgs.Front().Value.(Token))
+	start := string(r.Events.Front().Value.(Token))
 	end := ""
 	//for {
 	resMessages, err := c.cli.Messages(r.ID, start, end, 'b', int(num))
@@ -75,11 +75,6 @@ func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 	}
 	count += prependRoomEvents(r, resMessages.Chunk)
 	r.PushFrontToken(resMessages.End)
-	//if count >= num {
-	//	break
-	//}
-	//start = resMessages.End
-	//}
 	return count, nil
 }
 
@@ -169,10 +164,6 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 
 	c.cfg.UserID = fmt.Sprintf("@%s:%s", c.cfg.Username,
 		strings.TrimPrefix(c.cfg.Homeserver, "https://"))
-
-	//ui.Init()
-	//ui.SetMyDisplayName(c.cfg.DisplayName)
-	//ui.SetMyUserID(c.cfg.UserID)
 
 	c.DebugBuf = bytes.NewBufferString("")
 	c.minMsgs = 50

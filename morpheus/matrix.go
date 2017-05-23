@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,56 @@ type Message struct {
 	Content interface{}
 }
 
+type Events struct {
+	l   *list.List
+	rwm *sync.RWMutex
+}
+
+func NewEvents() (evs Events) {
+	evs.l = list.New()
+	evs.rwm = &sync.RWMutex{}
+	return evs
+}
+
+func (evs *Events) PushBack(e interface{}) {
+	evs.rwm.Lock()
+	evs.l.PushBack(e)
+	evs.rwm.Unlock()
+}
+
+func (evs *Events) PushFront(e interface{}) {
+	evs.rwm.Lock()
+	evs.l.PushFront(e)
+	evs.rwm.Unlock()
+}
+
+func (evs *Events) Front() *list.Element {
+	evs.rwm.RLock()
+	defer evs.rwm.RUnlock()
+	return evs.l.Front()
+}
+
+func (evs *Events) Iterator() *EventsIterator {
+	evs.rwm.RLock()
+	return &EventsIterator{cur: evs.l.Front(), rwm: evs.rwm}
+}
+
+type EventsIterator struct {
+	cur *list.Element
+	rwm *sync.RWMutex
+}
+
+func (evsIt *EventsIterator) Next() *list.Element {
+	defer func() {
+		if evsIt.cur == nil {
+			evsIt.rwm.RUnlock()
+		} else {
+			evsIt.cur = evsIt.cur.Next()
+		}
+	}()
+	return evsIt.cur
+}
+
 type TextMessage struct {
 	Body string
 }
@@ -46,7 +97,9 @@ type User struct {
 	DispName string
 	Power    int
 	Mem      Membership
-	UI       interface{}
+
+	rwm sync.RWMutex
+	UI  interface{}
 }
 
 func (u *User) String() string {
@@ -82,7 +135,9 @@ type Users struct {
 	ByID map[string]*User
 	// TODO: Concurrent write and/or read is not ok
 	ByName map[string][]*User
-	Room   *Room
+
+	Room *Room
+	rwm  *sync.RWMutex
 }
 
 func newUsers(r *Room) (us Users) {
@@ -90,6 +145,7 @@ func newUsers(r *Room) (us Users) {
 	us.ByID = make(map[string]*User, 0)
 	us.ByName = make(map[string][]*User, 0)
 	us.Room = r
+	us.rwm = &sync.RWMutex{}
 	return us
 }
 
@@ -149,14 +205,15 @@ func (us *Users) SetUserName(u *User, name string) {
 }
 
 type Room struct {
-	ID          string
-	Name        string
-	DispName    string
-	CanonAlias  string
-	Topic       string
-	Users       Users
-	Msgs        *list.List
-	msgsLen     int
+	ID         string
+	Name       string
+	DispName   string
+	CanonAlias string
+	Topic      string
+	Users      Users
+	//Msgs        *list.List
+	Events Events
+	//msgsLen     int
 	tokensLen   int
 	HasFirstMsg bool
 	HasLastMsg  bool
@@ -164,6 +221,7 @@ type Room struct {
 	myUserID *string
 
 	Rooms *Rooms
+	rwm   sync.RWMutex
 	UI    interface{}
 }
 
@@ -174,15 +232,14 @@ func NewRoom(rs *Rooms, id, name, canonAlias, topic string) (r *Room) {
 	r.CanonAlias = canonAlias
 	r.Topic = topic
 	r.Users = newUsers(r)
-	//r.Msgs = make([]Message, 0)
-	r.Msgs = list.New()
+	r.Events = NewEvents()
 	r.Rooms = rs
 	return r
 }
 
-func (r *Room) MsgsLen() int {
-	return r.msgsLen
-}
+//func (r *Room) MsgsLen() int {
+//	return r.msgsLen
+//}
 
 func (r *Room) String() string {
 	return r.DispName
@@ -247,12 +304,12 @@ func parseMessage(msgType string, content map[string]interface{}) (interface{}, 
 }
 
 func (r *Room) PushToken(token string) {
-	r.Msgs.PushBack(Token(token))
+	r.Events.PushBack(Token(token))
 	r.tokensLen++
 }
 
 func (r *Room) PushFrontToken(token string) {
-	r.Msgs.PushFront(Token(token))
+	r.Events.PushFront(Token(token))
 	r.tokensLen++
 }
 
@@ -265,16 +322,16 @@ func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 	}
 	// TODO: Convert content into a struct.  Have convert as map[string]interface{}
 	m := &Message{msgType, id, ts, userID, cnt}
-	r.Msgs.PushBack(m)
-	r.msgsLen++
+	r.Events.PushBack(m)
+	//r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, m)
 	return nil
 }
 
 func (r *Room) PushTextMessage(id string, ts int64, userID, body string) error {
 	m := &Message{"m.text", id, ts, userID, TextMessage{body}}
-	r.Msgs.PushBack(m)
-	r.msgsLen++
+	r.Events.PushBack(m)
+	//r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, m)
 	return nil
 }
@@ -287,8 +344,8 @@ func (r *Room) PushFrontMessage(msgType, id string, ts int64, userID string,
 		return err
 	}
 	m := &Message{msgType, id, ts, userID, cnt}
-	r.Msgs.PushFront(m)
-	r.msgsLen++
+	r.Events.PushFront(m)
+	//r.msgsLen++
 	return nil
 }
 
@@ -317,6 +374,7 @@ type Rooms struct {
 	ConsoleDisplayName string
 	ConsoleUserID      string
 
+	rwm  *sync.RWMutex
 	call Callbacks
 	UI   interface{}
 }
@@ -325,6 +383,7 @@ func NewRooms(call Callbacks) (rs Rooms) {
 	rs.R = make([]*Room, 0)
 	rs.ByID = make(map[string]*Room, 0)
 	rs.ByName = make(map[string][]*Room, 0)
+	rs.rwm = &sync.RWMutex{}
 	rs.call = call
 	return rs
 }

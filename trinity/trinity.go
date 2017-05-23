@@ -122,20 +122,11 @@ var readlineHeight int = 1
 
 var displayNamesID = false
 
-// Callbacks
-//var callSendText func(roomID, body string)
-//var callJoinRoom func(roomIDorAlias string)
-//var callLeaveRoom func(roomID string)
-//var callQuit func()
-
 // END CONFIG
 
 // GLOBALS
 
 var cli *mor.Client
-
-//var myDisplayName string
-//var myUserID string
 
 var currentRoom *mor.Room
 var lastRoom *mor.Room
@@ -321,8 +312,7 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 						//cli.ConsolePrintf("Got %v or 0 prev messages", err)
 						if currentRoom == room {
 							// Ugly hack?
-							scrollChan <- -1
-							scrollChan <- 1
+							scrollChan <- 0
 							rePrintChan <- "msgs"
 						}
 					} else {
@@ -402,25 +392,6 @@ func printView(g *gocui.Gui, view string) {
 func eventLoop(g *gocui.Gui) {
 	for {
 		select {
-		//case mr := <-sentMsgsChan:
-		//	var r *Room
-		//	if mr.Message.Body[0] == '/' {
-		//		r = rs.ConsoleRoom
-		//	} else {
-		//		r = mr.Room
-		//	}
-		//	if r == rs.ConsoleRoom {
-		//		appendRoomMsg(g, r, mr.Message)
-		//		body := strings.TrimPrefix(mr.Message.Body, "/")
-		//		args := strings.Fields(body)
-		//		if len(args) < 1 {
-		//			continue
-		//		}
-		//		cmdChan <- Args{mr.Room, args}
-		//	} else {
-		//		// TODO: Show the message temorarily until we
-		//		// get echoed by the server
-		//	}
 		case rm := <-recvMsgChan:
 			//appendRoomMsg(g, rm.Room, rm.Message)
 			g.Execute(func(g *gocui.Gui) error {
@@ -476,29 +447,6 @@ func eventLoop(g *gocui.Gui) {
 		}
 	}
 }
-
-//func joinRoom(roomIDorAlias string) {
-//	roomID, err := callJoinRoom(roomIDorAlias); err != nil {
-//		AddConsoleMessage(fmt.Sprint("join:", err))
-//	} else {
-//		AddConsoleMessage(fmt.Sprintf("Joined room (%s) %s: %s",
-//			roomID, resp["name"], resp["topic"]))
-//	}
-//}
-
-//func leaveRoom(roomID string) {
-//	r := rs.ByID[roomID]
-//	if r == nil {
-//		return
-//	}
-//	roomName := r.Name
-//	if err := callLeaveRoom(roomID); err != nil {
-//		AddConsoleMessage(fmt.Sprint("leave:", err))
-//	} else {
-//		AddConsoleMessage(fmt.Sprintf("Left room (%s) %s",
-//			roomID, roomName))
-//	}
-//}
 
 func roomIDCmd(args Args) string {
 	if len(args.Args) == 2 {
@@ -557,12 +505,6 @@ func cmdLoop(g *gocui.Gui) {
 		}
 	}
 }
-
-//func consoleReply(rep string) {
-//	RecvMsgsChan <- RoomMessage{
-//		&Message{"m.text", time.Now().Unix() * 1000, ConsoleUserID, rep},
-//		rs.ConsoleRoom}
-//}
 
 func AddedUser(r *mor.Room, u *mor.User) {
 	initUserUI(u)
@@ -930,11 +872,13 @@ func printRooms(v *gocui.View) {
 	rsUI := getRoomsUI(rs)
 	roomSets := [][]*mor.Room{[]*mor.Room{rs.ConsoleRoom}, rsUI.PeopleRooms, rsUI.GroupRooms}
 	for i, roomSet := range roomSets {
-		switch i {
-		case 1:
-			fmt.Fprintf(v, "\n    People\n\n")
-		case 2:
-			fmt.Fprintf(v, "\n    Groups\n\n")
+		if len(roomSet) != 0 {
+			switch i {
+			case 1:
+				fmt.Fprintf(v, "\n    People\n\n")
+			case 2:
+				fmt.Fprintf(v, "\n    Groups\n\n")
+			}
 		}
 		for _, r := range roomSet {
 			highStart := ""
@@ -964,7 +908,9 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	scrollDelta := 0
 	prevTs := time.Unix(0, 0)
 	prevMsgsBar := false
-	for e := r.Msgs.Front(); e != nil; e = e.Next() {
+	//for e := r.Events.Front(); e != nil; e = e.Next() {
+	it := r.Events.Iterator()
+	for e := it.Next(); e != nil; e = it.Next() {
 		if m, ok := e.Value.(*mor.Message); ok {
 			ts := time.Unix(m.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||
@@ -1125,8 +1071,6 @@ func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
 
 func quit(g *gocui.Gui) error {
 	// DEBUG
-	// panicing for now because it hangs
-	//panic("quit")
 	go cli.StopSync()
 	return gocui.ErrQuit
 }

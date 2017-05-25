@@ -4,6 +4,7 @@ import (
 	mor "../morpheus"
 	"bytes"
 	"fmt"
+	"sync"
 	//"github.com/jroimartin/gocui"
 	"../../gocui"
 	"hash/adler32"
@@ -43,15 +44,33 @@ func getUserUI(u *mor.User) *UserUI {
 }
 
 type RoomUI struct {
-	Shortcut            int
-	Fav                 bool
-	ViewMsgsOriginY     int
-	ScrollBottom        bool
-	ScrollSkipMsgs      uint
-	ScrollDelta         int
-	GettingPrev         bool
+	Shortcut        int
+	Fav             bool
+	ViewMsgsOriginY int
+	ScrollBottom    bool
+	ScrollSkipMsgs  uint
+	//ScrollDelta         int
+	gettingPrev         bool
+	gettingPrevM        sync.Mutex
 	ViewReadlineBuf     string
 	ViewReadlineCursorX int
+}
+
+func (rUI *RoomUI) TryGettingPrev() bool {
+	defer rUI.gettingPrevM.Unlock()
+	rUI.gettingPrevM.Lock()
+	if rUI.gettingPrev == false {
+		rUI.gettingPrev = true
+		return true
+	} else {
+		return false
+	}
+}
+
+func (rUI *RoomUI) UnsetGettingPrev() {
+	defer rUI.gettingPrevM.Unlock()
+	rUI.gettingPrevM.Lock()
+	rUI.gettingPrev = false
 }
 
 func initRoomUI(r *mor.Room) {
@@ -191,26 +210,8 @@ func shortcuts(key gocui.Key, ch rune, mod gocui.Modifier) bool {
 		}
 	} else {
 		switch {
-		case mod == gocui.ModAlt && ch == '0':
-			roomShortcut = 0
-		case mod == gocui.ModAlt && ch == '1':
-			roomShortcut = 1
-		case mod == gocui.ModAlt && ch == '2':
-			roomShortcut = 2
-		case mod == gocui.ModAlt && ch == '3':
-			roomShortcut = 3
-		case mod == gocui.ModAlt && ch == '4':
-			roomShortcut = 4
-		case mod == gocui.ModAlt && ch == '5':
-			roomShortcut = 5
-		case mod == gocui.ModAlt && ch == '6':
-			roomShortcut = 6
-		case mod == gocui.ModAlt && ch == '7':
-			roomShortcut = 7
-		case mod == gocui.ModAlt && ch == '8':
-			roomShortcut = 8
-		case mod == gocui.ModAlt && ch == '9':
-			roomShortcut = 9
+		case mod == gocui.ModAlt && ch >= '0' && ch <= '9':
+			roomShortcut = int(ch - '0')
 		case mod == gocui.ModAlt && ch == 'j':
 			modeLongRoomShortcut = true
 		default:
@@ -285,55 +286,41 @@ func initReadline() {
 	readlineMultiline = false
 }
 
+func getPrevEvents(room *mor.Room) {
+	roomUI := getRoomUI(room)
+	defer func() {
+		//roomUI.GettingPrev = false
+		roomUI.UnsetGettingPrev()
+	}()
+	// Fetch previous messages
+	count, err := cli.GetPrevEvents(currentRoom, uint(viewMsgsHeight*2))
+	if err != nil || count == 0 {
+		if currentRoom == room {
+			scrollChan <- 0
+		}
+	}
+	roomUI.ScrollSkipMsgs += count
+	if currentRoom == room {
+		rePrintChan <- "msgs"
+	}
+}
+
 func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 	_, y := viewMsgs.Origin()
 	newY := 0
 	if l <= 0 {
 		newY = y + l
 		if newY < 1 {
-			newY = 1
-			roomUI := getRoomUI(currentRoom)
-			l++
-			if !roomUI.GettingPrev && !currentRoom.HasFirstMsg {
-				newY = 0
-				// TODO: Use a mutex instead of the bool GettingPrev
-				roomUI.GettingPrev = true
-				//cli.ConsolePrint("Requesting old messages...")
-				go func() {
-					room := currentRoom
-					defer func() {
-						roomUI.GettingPrev = false
-					}()
-					roomUI.ScrollDelta = l
-					// Fetch previous messages
-					count, err := cli.GetPrevEvents(currentRoom,
-						uint(viewMsgsHeight*2))
-					if err != nil || count == 0 {
-						//cli.ConsolePrintf("Got %v or 0 prev messages", err)
-						if currentRoom == room {
-							// Ugly hack?
-							scrollChan <- 0
-							rePrintChan <- "msgs"
-						}
-					} else {
-						//cli.ConsolePrint("Got ", count, " prev messages")
-						roomUI.ScrollSkipMsgs += count
-						if currentRoom == room {
-							rePrintChan <- "msgs"
-						}
-					}
-				}()
-			} else if roomUI.GettingPrev {
-				newY = 0
-				roomUI.ScrollDelta = l
+			newY = 0
+			room := currentRoom
+			roomUI := getRoomUI(room)
+			if currentRoom.HasFirstMsg {
+				newY = 1
+			} else if roomUI.TryGettingPrev() {
+				go getPrevEvents(room)
 			}
 		}
-	}
-	if l > 0 {
-		roomUI := getRoomUI(currentRoom)
-		if roomUI.GettingPrev {
-			roomUI.ScrollDelta = 0
-		}
+	} else {
 		newY = min(y+l, viewMsgsLines-viewMsgsHeight)
 		newY = max(newY, 1)
 	}
@@ -508,7 +495,7 @@ func cmdLoop(g *gocui.Gui) {
 
 func AddedUser(r *mor.Room, u *mor.User) {
 	initUserUI(u)
-	UpdatedUser(r, u)
+	//UpdatedUser(r, u)
 }
 
 func DeletedUser(r *mor.Room, u *mor.User) {
@@ -543,14 +530,13 @@ func AddedRoom(r *mor.Room) {
 	roomUI.ViewMsgsOriginY = 1
 	roomUI.ScrollBottom = true
 	//rUI := getRoomUI(r)
-	UpdatedRoom(r)
+	//UpdatedRoom(r)
 	if started {
 		UpdateShortcuts(&cli.Rs)
 	}
 }
 
 func DeletedRoom(r *mor.Room) {
-
 	if started {
 		UpdateShortcuts(&cli.Rs)
 		if currentRoom == r {
@@ -604,19 +590,14 @@ func main() {
 
 	//
 	// Init
-
 	initRoomsUI(&cli.Rs)
-
 	currentRoom = cli.Rs.ConsoleRoom
 	lastRoom = currentRoom
-	//currentRoom = rs.ConsoleRoom
 
 	//
 	// Start
-
 	initReadline()
 	g, err := gocui.NewGui(gocui.Output256)
-	//g, err := gocui.NewGui(gocui.Output)
 	if err != nil {
 		log.Panicln(err)
 	}
@@ -682,7 +663,6 @@ func main() {
 	// TODO
 	// F11 / F12: scroll nicklist
 	// F9 / F10: scroll roomlist
-	// PgUp / PgDn: scroll text in current buffer
 
 	// Initialize eventLoop channels
 	//sentMsgsChan = make(chan RoomMessage, 16)
@@ -714,8 +694,6 @@ func main() {
 	cli.Login()
 	// TODO: Error checking
 	go cli.Sync()
-	//cli.ConsolePrint("Hello world!")
-	//cli.ConsolePrintf("%+v", *cli.Rs.ConsoleRoom.Users.U[0])
 
 	err = <-exit
 	if err != nil {
@@ -941,10 +919,10 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 		}
 	}
 	if roomUI.ScrollSkipMsgs != 0 {
-		cli.ConsolePrint("roomUI.ScrollDelta = ", roomUI.ScrollDelta)
-		scrollViewMsgs(v, scrollDelta+roomUI.ScrollDelta)
+		//cli.ConsolePrint("roomUI.ScrollDelta = ", roomUI.ScrollDelta)
+		scrollViewMsgs(v, scrollDelta) //+roomUI.ScrollDelta)
 		roomUI.ScrollSkipMsgs = 0
-		roomUI.ScrollDelta = 0
+		//roomUI.ScrollDelta = 0
 	}
 }
 
@@ -968,7 +946,7 @@ func printRoomUsers(v *gocui.View, r *mor.Room) {
 
 func printStatusLine(v *gocui.View, r *mor.Room) {
 	v.Clear()
-	u := currentRoom.Users.ByID[cli.GetUserID()]
+	u := currentRoom.Users.ByID(cli.GetUserID())
 	power := "!"
 	if u != nil {
 		if u.Power > 50 {
@@ -989,7 +967,7 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
 	msgWidth, _ := v.Size()
 	t := time.Unix(m.Ts/1000, 0)
-	u := r.Users.ByID[m.UserID]
+	u := r.Users.ByID(m.UserID)
 	var color byte
 	var uUI *UserUI
 	if u == nil {
@@ -1004,10 +982,7 @@ func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
 		color = nick256Colors[uUI.DispNameHash%uint32(len(nick256Colors))]
 	}
 	username := strPadLeft(u.String(), timelineUserWidth-10, ' ')
-	//color := nickRGBColors[uUI.DispNameHash%uint32(len(nickRGBColors))]
-	//username = fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0;0m", color.r, color.g, color.b, username)
 	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
-	//username = fmt.Sprintf("\x1b[38;2;255;0;0m%s\x1b[0;0m", "HOLA")
 	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[0;0m", " ", username, " ")
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth

@@ -108,6 +108,8 @@ func (u *User) String() string {
 
 // If myUserID != "", update the room display name
 func (u *User) updateDispName(r *Room, myUserID string) {
+	u.rwm.Lock()
+	defer u.rwm.Unlock()
 	prevDispName := u.DispName
 	defer func() {
 		if u.DispName != prevDispName {
@@ -132,7 +134,7 @@ func (u *User) updateDispName(r *Room, myUserID string) {
 type Users struct {
 	U []*User
 	// TODO: Concurrent write and/or read is not ok
-	ByID map[string]*User
+	byID map[string]*User
 	// TODO: Concurrent write and/or read is not ok
 	ByName map[string][]*User
 
@@ -140,9 +142,15 @@ type Users struct {
 	rwm  *sync.RWMutex
 }
 
+func (us *Users) ByID(id string) *User {
+	us.rwm.RLock()
+	defer us.rwm.RUnlock()
+	return us.byID[id]
+}
+
 func newUsers(r *Room) (us Users) {
 	us.U = make([]*User, 0)
-	us.ByID = make(map[string]*User, 0)
+	us.byID = make(map[string]*User, 0)
 	us.ByName = make(map[string][]*User, 0)
 	us.Room = r
 	us.rwm = &sync.RWMutex{}
@@ -150,20 +158,25 @@ func newUsers(r *Room) (us Users) {
 }
 
 func (us *Users) Add(id, name string, power int, mem Membership) (*User, error) {
-	u, err := us.AddBatch(id, name, power, mem)
+	us.rwm.Lock()
+	u, err := us.addBatch(id, name, power, mem)
 	if err != nil {
+		us.rwm.Unlock()
 		return nil, err
 	}
 	us.Room.Rooms.call.AddUser(us.Room, u)
 	for _, u := range us.U {
 		u.updateDispName(us.Room, *us.Room.myUserID)
 	}
+	us.rwm.Unlock()
+
 	us.Room.updateDispName(*us.Room.myUserID)
+	us.Room.Rooms.call.UpdateUser(us.Room, u)
 	return u, nil
 }
 
-func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, error) {
-	if us.ByID[id] != nil {
+func (us *Users) addBatch(id, name string, power int, mem Membership) (*User, error) {
+	if us.byID[id] != nil {
 		return nil, fmt.Errorf("User %v already exists in this room", id)
 	}
 	u := &User{
@@ -174,7 +187,7 @@ func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, er
 		Mem:      mem,
 	}
 	us.U = append(us.U, u)
-	us.ByID[u.ID] = u
+	us.byID[u.ID] = u
 	if u.Name != "" {
 		if us.ByName[u.Name] == nil {
 			us.ByName[u.Name] = make([]*User, 0)
@@ -184,23 +197,36 @@ func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, er
 	return u, nil
 }
 
+func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, error) {
+	us.rwm.Lock()
+	defer us.rwm.Unlock()
+	u, err := us.addBatch(id, name, power, mem)
+	return u, err
+}
+
 func (us *Users) AddBatchFinish() {
+	us.rwm.RLock()
 	for _, u := range us.U {
 		us.Room.Rooms.call.AddUser(us.Room, u)
 		u.updateDispName(us.Room, "")
 	}
 	us.Room.updateDispName(*us.Room.myUserID)
+	us.rwm.RUnlock()
 }
 
 func (us *Users) Del(u *User) {
+	us.rwm.Lock()
 	// TODO
 	// TODO: What if there are two users with the same name?
+	us.rwm.Unlock()
 	us.Room.Rooms.call.DelUser(us.Room, u)
 }
 
 func (us *Users) SetUserName(u *User, name string) {
+	us.rwm.Lock()
 	// TODO
 	// TODO: What if there are two users with the same name?
+	us.rwm.Unlock()
 	us.Room.Rooms.call.UpdateUser(us.Room, u)
 }
 
@@ -246,6 +272,8 @@ func (r *Room) String() string {
 }
 
 func (r *Room) updateDispName(myUserID string) {
+	r.rwm.Lock()
+	defer r.rwm.Unlock()
 	prevDispName := r.DispName
 	defer func() {
 		if r.DispName != prevDispName {
@@ -261,24 +289,24 @@ func (r *Room) updateDispName(myUserID string) {
 		return
 	}
 	roomUserIDs := make([]string, 0)
-	for k := range r.Users.ByID {
-		if k == myUserID {
+	for _, u := range r.Users.U {
+		if u.ID == myUserID {
 			continue
 		}
-		roomUserIDs = append(roomUserIDs, k)
-	}
-	if len(roomUserIDs) == 1 {
-		r.DispName = r.Users.ByID[roomUserIDs[0]].String()
-		return
+		roomUserIDs = append(roomUserIDs, u.ID)
 	}
 	sort.Strings(roomUserIDs)
+	if len(roomUserIDs) == 1 {
+		r.DispName = r.Users.ByID(roomUserIDs[0]).String()
+		return
+	}
 	if len(roomUserIDs) == 2 {
-		r.DispName = fmt.Sprintf("%s and %s", r.Users.ByID[roomUserIDs[0]],
-			r.Users.ByID[roomUserIDs[1]])
+		r.DispName = fmt.Sprintf("%s and %s", r.Users.ByID(roomUserIDs[0]),
+			r.Users.ByID(roomUserIDs[1]))
 		return
 	}
 	if len(roomUserIDs) > 2 {
-		r.DispName = fmt.Sprintf("%s and %d others", r.Users.ByID[roomUserIDs[0]],
+		r.DispName = fmt.Sprintf("%s and %d others", r.Users.ByID(roomUserIDs[0]),
 			len(roomUserIDs)-1)
 		return
 	}
@@ -389,13 +417,14 @@ func NewRooms(call Callbacks) (rs Rooms) {
 }
 
 func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (*Room, error) {
+	rs.rwm.Lock()
 	_, ok := rs.ByID[roomID]
 	if ok {
+		rs.rwm.Unlock()
 		return nil, fmt.Errorf("Room %v already exists", roomID)
 	}
 	r := NewRoom(rs, roomID, name, canonAlias, topic)
 	r.myUserID = myUserID
-	r.updateDispName(*r.myUserID)
 	rs.R = append(rs.R, r)
 	rs.ByID[r.ID] = r
 	if r.Name != "" {
@@ -404,13 +433,19 @@ func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (
 		}
 		rs.ByName[r.Name] = append(rs.ByName[r.Name], r)
 	}
+	rs.rwm.Unlock()
+
 	rs.call.AddRoom(r)
+	r.updateDispName(*r.myUserID)
+	rs.call.UpdateRoom(r)
 	return r, nil
 }
 
 func (rs *Rooms) Del(roomID string) (*Room, error) {
+	rs.rwm.Lock()
 	r, ok := rs.ByID[roomID]
 	if !ok {
+		rs.rwm.Unlock()
 		return nil, fmt.Errorf("Room %v doesn't exists", roomID)
 	}
 	delete(rs.ByID, r.ID)
@@ -425,13 +460,16 @@ func (rs *Rooms) Del(roomID string) (*Room, error) {
 		newR = append(newR, room)
 	}
 	rs.R = newR
+	rs.rwm.Unlock()
 	rs.call.DelRoom(r)
 	return r, nil
 }
 
 func (rs *Rooms) SetRoomName(r *Room, name string) {
+	rs.rwm.Lock()
 	// TODO
 	// TODO: What if there are two rooms with the same name?
+	rs.rwm.Unlock()
 	rs.call.UpdateRoom(r)
 }
 

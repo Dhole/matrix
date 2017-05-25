@@ -178,7 +178,7 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	r.HasFirstMsg = true
 	r.Users.Add(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
 	r.Users.Add(c.cfg.UserID, c.cfg.DisplayName, 0, MemJoin)
-	c.Rs.ConsoleRoom = c.Rs.ByID[c.Rs.consoleRoomID]
+	c.Rs.ConsoleRoom = c.Rs.ByID(c.Rs.consoleRoomID)
 	if c.Rs.ConsoleRoom != c.Rs.R[0] {
 		panic("ConsoleRoom is not Rs.R[0]")
 	}
@@ -196,7 +196,7 @@ func (c *Client) SendText(roomID, body string) {
 		if len(args) < 1 {
 			return
 		}
-		c.Rs.call.Cmd(c.Rs.ByID[roomID], args)
+		c.Rs.call.Cmd(c.Rs.ByID(roomID), args)
 	} else {
 		_, err := c.cli.SendText(roomID, body)
 		if err != nil {
@@ -225,9 +225,11 @@ func (c *Client) LeaveRoom(roomID string) {
 		c.ConsolePrint("leave:", err)
 		return
 	}
-	r, err := c.Rs.Del(roomID)
-	if err != nil {
-		c.ConsolePrint("leave:", err)
+	// TODO: Figure out if room datastructure should be removed or not
+	//r, err := c.Rs.Del(roomID)
+	r := c.Rs.ByID(roomID)
+	if r == nil {
+		c.ConsolePrint("leave:", roomID, "not found")
 		return
 	}
 	c.ConsolePrintf("Left room (%s) %s", roomID, r.DispName)
@@ -256,20 +258,21 @@ func (c *Client) Login() error {
 func (c *Client) Sync() error {
 	c.ConsolePrint("Doing initial sync request ...")
 	//`{"room":{"timeline":{"limit":50}}}`
-	resSync, err := c.cli.SyncRequest(30000, "", "", false, "online")
+	res, err := c.cli.SyncRequest(30000, "", "", false, "online")
 	if err != nil {
 		return err
 	}
 	c.ConsolePrint("Initial sync request finished")
 	//fmt.Println("Joined rooms...")
-	for roomID, roomHist := range resSync.Rooms.Join {
+	//c.update(res)
+	for roomID, roomHist := range res.Rooms.Join {
 		// TODO: Check return error
 		c.loadRoomAndData(roomID)
 		//fmt.Println(roomID)
 		fmt.Fprintf(c.DebugBuf, "room %s has %d timeline.events",
 			roomID, len(roomHist.Timeline.Events))
-		r, ok := c.Rs.ByID[roomID]
-		if !ok {
+		r := c.Rs.ByID(roomID)
+		if r == nil {
 			continue
 		}
 		appendRoomEvents(r, roomHist.Timeline.Events)
@@ -286,13 +289,13 @@ func (c *Client) Sync() error {
 	}
 	c.ConsolePrint("Finished loading rooms")
 	// TODO: Populate invited rooms
-	//for roomID, roomHist := range resSync.Rooms.Invite {
+	//for roomID, roomHist := range res.Rooms.Invite {
 	// NOTE: Don't display state events in the timeline
 	//for _, ev := range roomHist.State.Events {
 	//}
 	//}
 	// TODO: Populate account data
-	//for _, ev := range resSync.AccountData.Events {
+	//for _, ev := range res.AccountData.Events {
 	//}
 
 	// TODO: Do this only if the already set display name doesn't match the config
@@ -300,33 +303,47 @@ func (c *Client) Sync() error {
 	//	cli.SetDisplayName(c.cfg.DisplayName)
 	//}
 
-	syncer := c.cli.Syncer.(*gomatrix.DefaultSyncer)
-	syncer.OnEventType("m.room.message", func(ev *gomatrix.Event) {
-		//fmt.Println("Message: ", ev)
-		r := c.Rs.ByID[ev.RoomID]
-		if r != nil {
-			if ev.Type == "m.room.message" {
-				msgType, ok := ev.Content["msgtype"].(string)
-				if !ok {
-					return
-				}
-				r.PushMessage(msgType, ev.ID, int64(ev.Timestamp),
-					ev.Sender, ev.Content)
-				//c.RecvMsgsChan <- MessageRoom{m, r}
-			}
-		} else {
-			fmt.Fprintf(c.DebugBuf,
-				"Received message for room %v, which doesn't exist", ev.RoomID)
-		}
-	})
-
-	c.exit = make(chan error)
 	go func() {
-		if err := c.cli.Sync(); err != nil {
-			c.exit <- fmt.Errorf("Sync() returned %v", err)
+		for {
+			res, err = c.cli.SyncRequest(30000, res.NextBatch, "", false, "")
+			if err != nil {
+				// TODO: Add an exponential back-off up to 5 minutes or something.
+				time.Sleep(30)
+				continue
+			}
+			c.update(res)
 		}
 	}()
+
+	c.exit = make(chan error)
 	return <-c.exit
+}
+
+func (c *Client) update(res *gomatrix.RespSync) {
+	for roomID, roomData := range res.Rooms.Join {
+		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
+		for _, ev := range roomData.State.Events {
+			r.updateState(&ev)
+		}
+		for _, ev := range roomData.Timeline.Events {
+			r.PushEvent(&ev)
+		}
+	}
+	for roomID, roomData := range res.Rooms.Invite {
+		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
+		for _, ev := range roomData.State.Events {
+			r.updateState(&ev)
+		}
+	}
+	for roomID, roomData := range res.Rooms.Leave {
+		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
+		for _, ev := range roomData.State.Events {
+			r.updateState(&ev)
+		}
+		for _, ev := range roomData.Timeline.Events {
+			r.PushEvent(&ev)
+		}
+	}
 }
 
 // TODO: Actually stop the c.cli.Sync()

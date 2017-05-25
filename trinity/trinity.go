@@ -15,15 +15,17 @@ import (
 	"unicode/utf8"
 )
 
+// FIXME: Console room doesn't scroll to bottom
+
 type RGBColor struct {
 	r, g, b byte
 }
 
 type Words []string
 
-type RoomMessage struct {
-	Room    *mor.Room
-	Message *mor.Message
+type RoomEvent struct {
+	Room  *mor.Room
+	Event *mor.Event
 }
 
 type Args struct {
@@ -164,7 +166,7 @@ var viewMsgsLines int
 var scrollBottom bool
 
 // eventLoop channels
-var recvMsgChan chan RoomMessage
+var recvMsgChan chan RoomEvent
 var rePrintChan chan string
 var scrollChan chan int
 var switchRoomChan chan bool
@@ -379,12 +381,11 @@ func printView(g *gocui.Gui, view string) {
 func eventLoop(g *gocui.Gui) {
 	for {
 		select {
-		case rm := <-recvMsgChan:
-			//appendRoomMsg(g, rm.Room, rm.Message)
+		case re := <-recvMsgChan:
 			g.Execute(func(g *gocui.Gui) error {
 				viewMsgs, _ := g.View("msgs")
-				if rm.Room == currentRoom {
-					printMessage(viewMsgs, rm.Message, rm.Room)
+				if re.Room == currentRoom {
+					printMessage(viewMsgs, re.Event, re.Room)
 					if scrollBottom {
 						scrollViewMsgsBottom(g)
 					}
@@ -562,10 +563,10 @@ func UpdatedRoom(r *mor.Room) {
 	}
 }
 
-func ArrvdMessage(r *mor.Room, m *mor.Message) {
+func ArrvdMessage(r *mor.Room, e *mor.Event) {
 	if started {
 		if currentRoom == r {
-			recvMsgChan <- RoomMessage{r, m}
+			recvMsgChan <- RoomEvent{r, e}
 		}
 	}
 }
@@ -666,7 +667,7 @@ func main() {
 
 	// Initialize eventLoop channels
 	//sentMsgsChan = make(chan RoomMessage, 16)
-	recvMsgChan = make(chan RoomMessage, 16)
+	recvMsgChan = make(chan RoomEvent, 16)
 	rePrintChan = make(chan string, 16)
 	scrollChan = make(chan int, 16)
 	switchRoomChan = make(chan bool, 16)
@@ -886,11 +887,10 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	scrollDelta := 0
 	prevTs := time.Unix(0, 0)
 	prevMsgsBar := false
-	//for e := r.Events.Front(); e != nil; e = e.Next() {
 	it := r.Events.Iterator()
-	for e := it.Next(); e != nil; e = it.Next() {
-		if m, ok := e.Value.(*mor.Message); ok {
-			ts := time.Unix(m.Ts/1000, 0)
+	for elem := it.Next(); elem != nil; elem = it.Next() {
+		if e, ok := elem.Value.(*mor.Event); ok {
+			ts := time.Unix(e.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||
 				prevTs.Month() != ts.Month() ||
 				prevTs.Year() != ts.Year() {
@@ -907,7 +907,7 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 				prevMsgsBar = false
 			}
 			prevTs = ts
-			printMessage(v, m, r)
+			printMessage(v, e, r)
 			count++
 			if count == roomUI.ScrollSkipMsgs {
 				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;29m",
@@ -964,17 +964,17 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 		currentRoom.Topic)
 }
 
-func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
+func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 	msgWidth, _ := v.Size()
-	t := time.Unix(m.Ts/1000, 0)
-	u := r.Users.ByID(m.UserID)
+	t := time.Unix(e.Ts/1000, 0)
+	u := r.Users.ByID(e.Sender)
 	var color byte
 	var uUI *UserUI
 	if u == nil {
 		if r.ID == mor.ConsoleRoomID {
 			cli.ConsolePrintf("%+v", r.Users.U)
 		}
-		u = &mor.User{ID: m.UserID, DispName: m.UserID, UI: &UserUI{DispNameHash: 0}}
+		u = &mor.User{ID: e.Sender, DispName: e.Sender, UI: &UserUI{DispNameHash: 0}}
 		uUI = getUserUI(u)
 		color = 244
 	} else {
@@ -987,11 +987,17 @@ func printMessage(v *gocui.View, m *mor.Message, r *mor.Room) {
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth
 	text := ""
-	switch m.MsgType {
-	case "m.text":
-		text = m.Content.(mor.TextMessage).Body
+	switch ec := e.Content.(type) {
+	case mor.Message:
+		switch mc := ec.Content.(type) {
+		case mor.TextMessage:
+			text = mc.Body
+		default:
+			text = fmt.Sprintf("msgtype %s not supported yet", ec.MsgType)
+		}
 	default:
-		text = fmt.Sprintf("msgtype %s not supported yet", m.MsgType)
+		//text = fmt.Sprintf("%+v %+v", e, e.Content)
+		return
 	}
 	text = strings.Replace(text, "\x1b", "\\x1b", -1)
 	lines := 0

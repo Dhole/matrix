@@ -3,6 +3,7 @@ package morpheus
 import (
 	"../list"
 	"fmt"
+	"github.com/matrix-org/gomatrix"
 	"sort"
 	"strconv"
 	"sync"
@@ -23,10 +24,19 @@ func txnID() string {
 
 type Message struct {
 	MsgType string
-	ID      string
-	Ts      int64
-	UserID  string
+	//ID      string
+	//Ts      int64
+	//Sender  string
 	Content interface{}
+}
+
+type Event struct {
+	Type     string
+	ID       string
+	Ts       int64
+	Sender   string
+	StateKey *string
+	Content  interface{}
 }
 
 type Events struct {
@@ -83,6 +93,10 @@ type TextMessage struct {
 	Body string
 }
 
+type StateRoomName struct {
+	Name string
+}
+
 type Membership int
 
 const (
@@ -123,7 +137,7 @@ func (u *User) updateDispName(r *Room, myUserID string) {
 		u.DispName = u.ID
 		return
 	}
-	if len(r.Users.ByName[u.Name]) > 1 {
+	if len(r.Users.byName[u.Name]) > 1 {
 		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.ID)
 		return
 	}
@@ -136,7 +150,7 @@ type Users struct {
 	// TODO: Concurrent write and/or read is not ok
 	byID map[string]*User
 	// TODO: Concurrent write and/or read is not ok
-	ByName map[string][]*User
+	byName map[string][]*User
 
 	Room *Room
 	rwm  *sync.RWMutex
@@ -151,7 +165,7 @@ func (us *Users) ByID(id string) *User {
 func newUsers(r *Room) (us Users) {
 	us.U = make([]*User, 0)
 	us.byID = make(map[string]*User, 0)
-	us.ByName = make(map[string][]*User, 0)
+	us.byName = make(map[string][]*User, 0)
 	us.Room = r
 	us.rwm = &sync.RWMutex{}
 	return us
@@ -189,10 +203,10 @@ func (us *Users) addBatch(id, name string, power int, mem Membership) (*User, er
 	us.U = append(us.U, u)
 	us.byID[u.ID] = u
 	if u.Name != "" {
-		if us.ByName[u.Name] == nil {
-			us.ByName[u.Name] = make([]*User, 0)
+		if us.byName[u.Name] == nil {
+			us.byName[u.Name] = make([]*User, 0)
 		}
-		us.ByName[u.Name] = append(us.ByName[u.Name], u)
+		us.byName[u.Name] = append(us.byName[u.Name], u)
 	}
 	return u, nil
 }
@@ -317,18 +331,66 @@ func parseMessage(msgType string, content map[string]interface{}) (interface{}, 
 	var cnt interface{}
 	switch msgType {
 	case "m.text":
-		var cm TextMessage
+		var mc TextMessage
 		body, ok := content["body"].(string)
 		if !ok {
 			return nil, fmt.Errorf("Error decoding msgtype %s with content %+v",
 				msgType, content)
 		}
-		cm.Body = body
-		cnt = cm
+		mc.Body = body
+		cnt = mc
 	default:
 		return nil, fmt.Errorf("msgtype %s not supported yet", msgType)
 	}
 	return cnt, nil
+}
+
+func parseEvent(evType string, stateKey *string,
+	content map[string]interface{}) (interface{}, error) {
+	var cnt interface{}
+	switch evType {
+	//case "m.room.aliases":
+	//case "m.room.canonical_alias":
+	//case "m.room.create":
+	//case "m.room.join_rules":
+	//case "m.room.member":
+	//case "m.room.power_levels":
+	//case "m.room.redaction":
+	case "m.room.message": // Stateless
+		//var ec Message
+		msgType, ok := content["msgtype"].(string)
+		if !ok {
+			return nil, fmt.Errorf("Invalid %s", evType)
+		}
+		mc, err := parseMessage(msgType, content)
+		if err != nil {
+			return nil, err
+		}
+		cnt = Message{msgType, mc}
+	//case "m.room.message.feedback": // Stateless
+	case "m.room.name":
+		//var ec StateRoomName
+		name, ok := content["name"].(string)
+		if !ok {
+			return nil, fmt.Errorf("Error decoding event %s with content %+v",
+				evType, content)
+		}
+		//ec.Name = name
+		//cnt = ec
+		cnt = StateRoomName{Name: name}
+	//case "m.room.topic":
+	//case "m.room.avatar":
+	default:
+		return nil, fmt.Errorf("event %s not supported yet", evType)
+	}
+	return cnt, nil
+}
+
+func (r *Room) SetName(name string) {
+	r.rwm.Lock()
+	r.Name = name
+	r.rwm.Unlock()
+	r.updateDispName(*r.myUserID)
 }
 
 func (r *Room) PushToken(token string) {
@@ -348,19 +410,30 @@ func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 	if err != nil {
 		return err
 	}
-	// TODO: Convert content into a struct.  Have convert as map[string]interface{}
-	m := &Message{msgType, id, ts, userID, cnt}
-	r.Events.PushBack(m)
+	e := &Event{"m.room.message", id, ts, userID, nil, Message{msgType, cnt}}
+	r.Events.PushBack(e)
 	//r.msgsLen++
-	r.Rooms.call.ArrvMessage(r, m)
+	r.Rooms.call.ArrvMessage(r, e)
 	return nil
 }
 
 func (r *Room) PushTextMessage(id string, ts int64, userID, body string) error {
-	m := &Message{"m.text", id, ts, userID, TextMessage{body}}
-	r.Events.PushBack(m)
+	e := &Event{"m.room.message", id, ts, userID, nil, Message{"m.text", TextMessage{body}}}
+	r.Events.PushBack(e)
 	//r.msgsLen++
-	r.Rooms.call.ArrvMessage(r, m)
+	r.Rooms.call.ArrvMessage(r, e)
+	return nil
+}
+
+func (r *Room) PushEvent(ev *gomatrix.Event) error {
+	cnt, err := parseEvent(ev.Type, ev.StateKey, ev.Content)
+	if err != nil {
+		return err
+	}
+	e := &Event{ev.Type, ev.ID, int64(ev.Timestamp), ev.Sender, ev.StateKey, cnt}
+	r.Events.PushBack(e)
+	//r.msgsLen++
+	r.Rooms.call.ArrvMessage(r, e)
 	return nil
 }
 
@@ -371,9 +444,25 @@ func (r *Room) PushFrontMessage(msgType, id string, ts int64, userID string,
 	if err != nil {
 		return err
 	}
-	m := &Message{msgType, id, ts, userID, cnt}
-	r.Events.PushFront(m)
+	e := &Event{"m.room.message", id, ts, userID, nil, Message{msgType, cnt}}
+	r.Events.PushFront(e)
 	//r.msgsLen++
+	return nil
+}
+
+func (r *Room) updateState(ev *gomatrix.Event) error {
+	r.rwm.Lock()
+	defer r.rwm.Unlock()
+	cnt, err := parseEvent(ev.Type, ev.StateKey, ev.Content)
+	if err != nil {
+		return err
+	}
+	switch cnt := cnt.(type) {
+	case StateRoomName:
+		r.SetName(cnt.Name)
+	default:
+		return fmt.Errorf("Event type not handled yet")
+	}
 	return nil
 }
 
@@ -386,7 +475,7 @@ type Callbacks struct {
 	DelRoom    func(r *Room)
 	UpdateRoom func(r *Room)
 
-	ArrvMessage func(r *Room, m *Message)
+	ArrvMessage func(r *Room, e *Event)
 
 	Cmd func(r *Room, args []string)
 }
@@ -394,9 +483,9 @@ type Callbacks struct {
 type Rooms struct {
 	R []*Room
 	// TODO: Concurrent write and/or read is not ok
-	ByID map[string]*Room
+	byID map[string]*Room
 	// TODO: Concurrent write and/or read is not ok
-	ByName             map[string][]*Room
+	byName             map[string][]*Room
 	ConsoleRoom        *Room
 	consoleRoomID      string
 	ConsoleDisplayName string
@@ -407,10 +496,22 @@ type Rooms struct {
 	UI   interface{}
 }
 
+func (rs *Rooms) ByID(id string) *Room {
+	rs.rwm.RLock()
+	defer rs.rwm.RUnlock()
+	return rs.byID[id]
+}
+
+func (rs *Rooms) ByName(name string) []*Room {
+	rs.rwm.RLock()
+	defer rs.rwm.RUnlock()
+	return rs.byName[name]
+}
+
 func NewRooms(call Callbacks) (rs Rooms) {
 	rs.R = make([]*Room, 0)
-	rs.ByID = make(map[string]*Room, 0)
-	rs.ByName = make(map[string][]*Room, 0)
+	rs.byID = make(map[string]*Room, 0)
+	rs.byName = make(map[string][]*Room, 0)
 	rs.rwm = &sync.RWMutex{}
 	rs.call = call
 	return rs
@@ -418,20 +519,17 @@ func NewRooms(call Callbacks) (rs Rooms) {
 
 func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (*Room, error) {
 	rs.rwm.Lock()
-	_, ok := rs.ByID[roomID]
+	r, ok := rs.byID[roomID]
 	if ok {
 		rs.rwm.Unlock()
-		return nil, fmt.Errorf("Room %v already exists", roomID)
+		return r, fmt.Errorf("Room %v already exists", roomID)
 	}
-	r := NewRoom(rs, roomID, name, canonAlias, topic)
+	r = NewRoom(rs, roomID, name, canonAlias, topic)
 	r.myUserID = myUserID
 	rs.R = append(rs.R, r)
-	rs.ByID[r.ID] = r
+	rs.byID[r.ID] = r
 	if r.Name != "" {
-		if rs.ByName[r.Name] == nil {
-			rs.ByName[r.Name] = make([]*Room, 0)
-		}
-		rs.ByName[r.Name] = append(rs.ByName[r.Name], r)
+		rs.byName[r.Name] = append(rs.byName[r.Name], r)
 	}
 	rs.rwm.Unlock()
 
@@ -443,14 +541,14 @@ func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (
 
 func (rs *Rooms) Del(roomID string) (*Room, error) {
 	rs.rwm.Lock()
-	r, ok := rs.ByID[roomID]
+	r, ok := rs.byID[roomID]
 	if !ok {
 		rs.rwm.Unlock()
 		return nil, fmt.Errorf("Room %v doesn't exists", roomID)
 	}
-	delete(rs.ByID, r.ID)
+	delete(rs.byID, r.ID)
 	if r.Name != "" {
-		delete(rs.ByName, r.Name)
+		delete(rs.byName, r.Name)
 	}
 	newR := make([]*Room, 0, len(rs.R)-1)
 	for _, room := range rs.R {

@@ -304,6 +304,10 @@ func getPrevEvents(room *mor.Room) {
 	roomUI.ScrollSkipMsgs += count
 	if currentRoom == room {
 		rePrintChan <- "msgs"
+		// At least load enough messages to cover the entire screen
+		if !room.HasFirstMsg && (viewMsgsLines < viewMsgsHeight) {
+			scrollChan <- -1
+		}
 	}
 }
 
@@ -1000,6 +1004,9 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 		return
 	}
 	text = strings.Replace(text, "\x1b", "\\x1b", -1)
+	if text == "" {
+		text = " "
+	}
 	lines := 0
 	for i, l := range strings.Split(text, "\n") {
 		strLen := 0

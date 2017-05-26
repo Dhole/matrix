@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	//sync "github.com/sasha-s/go-deadlock"
 	"time"
 )
 
@@ -68,6 +69,12 @@ func (evs *Events) Front() *list.Element {
 	return evs.l.Front()
 }
 
+func (evs *Events) Len() int {
+	evs.rwm.RLock()
+	defer evs.rwm.RUnlock()
+	return evs.l.Len()
+}
+
 func (evs *Events) Iterator() *EventsIterator {
 	evs.rwm.RLock()
 	return &EventsIterator{cur: evs.l.Front(), rwm: evs.rwm}
@@ -97,12 +104,22 @@ type StateRoomName struct {
 	Name string
 }
 
+type StateRoomCanonAlias struct {
+	Alias string
+}
+
+type StateRoomMember struct {
+	Name       string
+	Membership Membership
+}
+
 type Membership int
 
 const (
 	MemInvite Membership = iota
 	MemJoin   Membership = iota
 	MemLeave  Membership = iota
+	MemBan    Membership = iota
 )
 
 type User struct {
@@ -121,18 +138,18 @@ func (u *User) String() string {
 }
 
 // If myUserID != "", update the room display name
-func (u *User) updateDispName(r *Room, myUserID string) {
+func (u *User) updateDispName(r *Room) {
 	u.rwm.Lock()
 	defer u.rwm.Unlock()
 	prevDispName := u.DispName
+	//if myUserID != "" {
+	//	defer r.updateDispName(myUserID)
+	//}
 	defer func() {
 		if u.DispName != prevDispName {
 			r.Rooms.call.UpdateUser(r, u)
 		}
 	}()
-	if myUserID != "" {
-		defer r.updateDispName(myUserID)
-	}
 	if u.Name == "" {
 		u.DispName = u.ID
 		return
@@ -180,7 +197,7 @@ func (us *Users) Add(id, name string, power int, mem Membership) (*User, error) 
 	}
 	us.Room.Rooms.call.AddUser(us.Room, u)
 	for _, u := range us.U {
-		u.updateDispName(us.Room, *us.Room.myUserID)
+		u.updateDispName(us.Room)
 	}
 	us.rwm.Unlock()
 
@@ -222,10 +239,10 @@ func (us *Users) AddBatchFinish() {
 	us.rwm.RLock()
 	for _, u := range us.U {
 		us.Room.Rooms.call.AddUser(us.Room, u)
-		u.updateDispName(us.Room, "")
+		u.updateDispName(us.Room)
 	}
-	us.Room.updateDispName(*us.Room.myUserID)
 	us.rwm.RUnlock()
+	us.Room.updateDispName(*us.Room.myUserID)
 }
 
 func (us *Users) Del(u *User) {
@@ -350,14 +367,40 @@ func parseEvent(evType string, stateKey *string,
 	var cnt interface{}
 	switch evType {
 	//case "m.room.aliases":
-	//case "m.room.canonical_alias":
+	case "m.room.canonical_alias":
+		alias, ok := content["alias"].(string)
+		if !ok {
+			return nil, fmt.Errorf("Error decoding event %s with content %+v",
+				evType, content)
+		}
+		cnt = StateRoomCanonAlias{Alias: alias}
 	//case "m.room.create":
 	//case "m.room.join_rules":
-	//case "m.room.member":
+	case "m.room.member":
+		name, ok1 := content["displayname"].(string)
+		mem, ok2 := content["membership"].(string)
+		if !ok1 || !ok2 {
+			return nil, fmt.Errorf("Error decoding event %s with content %+v",
+				evType, content)
+		}
+		membership := MemJoin
+		switch mem {
+		case "invite":
+			membership = MemInvite
+		case "join":
+			membership = MemJoin
+		case "leave":
+			membership = MemLeave
+		case "ban":
+			membership = MemBan
+		default:
+			return nil, fmt.Errorf("Error decoding event %s with content %+v",
+				evType, content)
+		}
+		cnt = StateRoomMember{Name: name, Membership: membership}
 	//case "m.room.power_levels":
 	//case "m.room.redaction":
 	case "m.room.message": // Stateless
-		//var ec Message
 		msgType, ok := content["msgtype"].(string)
 		if !ok {
 			return nil, fmt.Errorf("Invalid %s", evType)
@@ -369,14 +412,11 @@ func parseEvent(evType string, stateKey *string,
 		cnt = Message{msgType, mc}
 	//case "m.room.message.feedback": // Stateless
 	case "m.room.name":
-		//var ec StateRoomName
 		name, ok := content["name"].(string)
 		if !ok {
 			return nil, fmt.Errorf("Error decoding event %s with content %+v",
 				evType, content)
 		}
-		//ec.Name = name
-		//cnt = ec
 		cnt = StateRoomName{Name: name}
 	//case "m.room.topic":
 	//case "m.room.avatar":
@@ -389,6 +429,13 @@ func parseEvent(evType string, stateKey *string,
 func (r *Room) SetName(name string) {
 	r.rwm.Lock()
 	r.Name = name
+	r.rwm.Unlock()
+	r.updateDispName(*r.myUserID)
+}
+
+func (r *Room) SetCanonAlias(alias string) {
+	r.rwm.Lock()
+	r.CanonAlias = alias
 	r.rwm.Unlock()
 	r.updateDispName(*r.myUserID)
 }
@@ -451,8 +498,6 @@ func (r *Room) PushFrontMessage(msgType, id string, ts int64, userID string,
 }
 
 func (r *Room) updateState(ev *gomatrix.Event) error {
-	r.rwm.Lock()
-	defer r.rwm.Unlock()
 	cnt, err := parseEvent(ev.Type, ev.StateKey, ev.Content)
 	if err != nil {
 		return err
@@ -460,6 +505,15 @@ func (r *Room) updateState(ev *gomatrix.Event) error {
 	switch cnt := cnt.(type) {
 	case StateRoomName:
 		r.SetName(cnt.Name)
+	case StateRoomCanonAlias:
+		r.SetCanonAlias(cnt.Alias)
+	case StateRoomMember:
+		if ev.StateKey == nil || *ev.StateKey == "" {
+			return fmt.Errorf("m.room.member doesn't have a state key")
+		}
+		if cnt.Membership == MemJoin {
+			r.Users.Add(*ev.StateKey, cnt.Name, 0, cnt.Membership)
+		}
 	default:
 		return fmt.Errorf("Event type not handled yet")
 	}

@@ -60,7 +60,14 @@ func prependRoomEvents(r *Room, events []gomatrix.Event) uint {
 
 func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 	count := uint(0)
-	start := string(r.Events.Front().Value.(Token))
+	if r.Events.Len() == 0 {
+		return 0, fmt.Errorf("Events is empty")
+	}
+	token, ok := r.Events.Front().Value.(Token)
+	if !ok {
+		return 0, fmt.Errorf("Top Event is not a token")
+	}
+	start := string(token)
 	end := ""
 	//for {
 	resMessages, err := c.cli.Messages(r.ID, start, end, 'b', int(num))
@@ -264,29 +271,29 @@ func (c *Client) Sync() error {
 	}
 	c.ConsolePrint("Initial sync request finished")
 	//fmt.Println("Joined rooms...")
-	//c.update(res)
-	for roomID, roomHist := range res.Rooms.Join {
-		// TODO: Check return error
-		c.loadRoomAndData(roomID)
-		//fmt.Println(roomID)
-		fmt.Fprintf(c.DebugBuf, "room %s has %d timeline.events",
-			roomID, len(roomHist.Timeline.Events))
-		r := c.Rs.ByID(roomID)
-		if r == nil {
-			continue
-		}
-		appendRoomEvents(r, roomHist.Timeline.Events)
-		r.HasLastMsg = true
-		// Fetch a few previous messages
-		r.PushFrontToken(roomHist.Timeline.PrevBatch)
-		// DEBUG
-		c.GetPrevEvents(r, c.minMsgs)
+	c.update(res)
+	//for roomID, roomHist := range res.Rooms.Join {
+	//	// TODO: Check return error
+	//	c.loadRoomAndData(roomID)
+	//	//fmt.Println(roomID)
+	//	fmt.Fprintf(c.DebugBuf, "room %s has %d timeline.events",
+	//		roomID, len(roomHist.Timeline.Events))
+	//	r := c.Rs.ByID(roomID)
+	//	if r == nil {
+	//		continue
+	//	}
+	//	appendRoomEvents(r, roomHist.Timeline.Events)
+	//	r.HasLastMsg = true
+	//	// Fetch a few previous messages
+	//	r.PushFrontToken(roomHist.Timeline.PrevBatch)
+	//	// DEBUG
+	//	c.GetPrevEvents(r, c.minMsgs)
 
-		// TODO: Populate rooms state
-		// NOTE: Don't display state events in the timeline
-		//for _, ev := range roomHist.State.Events {
-		//}
-	}
+	//	// TODO: Populate rooms state
+	//	// NOTE: Don't display state events in the timeline
+	//	//for _, ev := range roomHist.State.Events {
+	//	//}
+	//}
 	c.ConsolePrint("Finished loading rooms")
 	// TODO: Populate invited rooms
 	//for roomID, roomHist := range res.Rooms.Invite {
@@ -325,9 +332,11 @@ func (c *Client) update(res *gomatrix.RespSync) {
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}
+		r.PushToken(roomData.Timeline.PrevBatch)
 		for _, ev := range roomData.Timeline.Events {
 			r.PushEvent(&ev)
 		}
+		r.PushToken(res.NextBatch)
 	}
 	for roomID, roomData := range res.Rooms.Invite {
 		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
@@ -340,9 +349,11 @@ func (c *Client) update(res *gomatrix.RespSync) {
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}
+		r.PushToken(roomData.Timeline.PrevBatch)
 		for _, ev := range roomData.Timeline.Events {
 			r.PushEvent(&ev)
 		}
+		r.PushToken(res.NextBatch)
 	}
 }
 

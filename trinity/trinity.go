@@ -305,8 +305,9 @@ func getPrevEvents(room *mor.Room) {
 	if currentRoom == room {
 		rePrintChan <- "msgs"
 		// At least load enough messages to cover the entire screen
-		if !room.HasFirstMsg && (viewMsgsLines < viewMsgsHeight) {
+		if !room.HasFirstMsg && (viewMsgsLines+1 < viewMsgsHeight) {
 			scrollChan <- -1
+			scrollChan <- +1
 		}
 	}
 }
@@ -707,8 +708,9 @@ func main() {
 }
 
 func strPadLeft(s string, pLen int, pad rune) string {
-	sLen := utf8.RuneCountInString(s)
+	sLen := RuneCountInStringNoEscape(s)
 	if sLen > pLen-2 {
+		// TODO: Make this utf-8
 		return s[:pLen-2] + ".."
 	} else {
 		return strings.Repeat(string(pad), pLen-sLen) + s
@@ -716,8 +718,9 @@ func strPadLeft(s string, pLen int, pad rune) string {
 }
 
 func strPadRight(s string, pLen int, pad rune) string {
-	sLen := utf8.RuneCountInString(s)
+	sLen := RuneCountInStringNoEscape(s)
 	if sLen > pLen-2 {
+		// TODO: Make this utf-8
 		return s[:pLen-2] + ".."
 	} else {
 		return s + strings.Repeat(string(pad), pLen-sLen)
@@ -893,6 +896,11 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	prevMsgsBar := false
 	it := r.Events.Iterator()
 	for elem := it.Next(); elem != nil; elem = it.Next() {
+		// DEBUG
+		if t, ok := elem.Value.(mor.Token); ok {
+			fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
+			viewMsgsLines++
+		}
 		if e, ok := elem.Value.(*mor.Event); ok {
 			ts := time.Unix(e.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||
@@ -968,16 +976,11 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 		currentRoom.Topic)
 }
 
-func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
-	msgWidth, _ := v.Size()
-	t := time.Unix(e.Ts/1000, 0)
+func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 	u := r.Users.ByID(e.Sender)
 	var color byte
 	var uUI *UserUI
 	if u == nil {
-		if r.ID == mor.ConsoleRoomID {
-			cli.ConsolePrintf("%+v", r.Users.U)
-		}
 		u = &mor.User{ID: e.Sender, DispName: e.Sender, UI: &UserUI{DispNameHash: 0}}
 		uUI = getUserUI(u)
 		color = 244
@@ -985,28 +988,41 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 		uUI = getUserUI(u)
 		color = nick256Colors[uUI.DispNameHash%uint32(len(nick256Colors))]
 	}
-	username := strPadLeft(u.String(), timelineUserWidth-10, ' ')
-	username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
-	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[0;0m", " ", username, " ")
-	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
-	viewMsgsWidth := msgWidth - timelineUserWidth
+
 	text := ""
+	username := ""
 	switch ec := e.Content.(type) {
 	case mor.Message:
+		username = strPadLeft(u.String(), timelineUserWidth-10, ' ')
+		username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
 		switch mc := ec.Content.(type) {
 		case mor.TextMessage:
 			text = mc.Body
+			text = strings.Replace(text, "\x1b", "\\x1b", -1)
 		default:
 			text = fmt.Sprintf("msgtype %s not supported yet", ec.MsgType)
 		}
 	default:
-		//text = fmt.Sprintf("%+v %+v", e, e.Content)
+		text = fmt.Sprintf("DEBUG:%+v", e)
+		username = strings.Repeat(" ", timelineUserWidth-10)
+		//return "", "", false
+	}
+
+	return username, text, true
+}
+
+func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
+	msgWidth, _ := v.Size()
+	t := time.Unix(e.Ts/1000, 0)
+	username, text, ok := eventToStrings(e, r)
+	if !ok {
 		return
 	}
-	text = strings.Replace(text, "\x1b", "\\x1b", -1)
-	if text == "" {
-		text = " "
-	}
+	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[0;0m", " ",
+		username, " ")
+
+	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
+	viewMsgsWidth := msgWidth - timelineUserWidth
 	lines := 0
 	for i, l := range strings.Split(text, "\n") {
 		strLen := 0
@@ -1014,10 +1030,10 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 			fmt.Fprint(v, timeLineSpace)
 		}
 		for j, w := range strings.Split(l, " ") {
-			wLen := utf8.RuneCountInString(w)
+			wLen := RuneCountInStringNoEscape(w)
 			if !utf8.ValidString(w) {
-				w = "\x1b[38;5;1mUTF8-ERR\x1b[0;0m"
-				wLen = len("UTF8-ERR")
+				w = "\x1b[38;5;1m�\x1b[0;0m"
+				wLen = 1
 			}
 			if strLen+wLen+1 > viewMsgsWidth {
 				if strLen != 0 {
@@ -1053,6 +1069,9 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 		}
 		fmt.Fprint(v, "\n")
 		lines += 1
+	}
+	if text == "" {
+		fmt.Fprint(v, "\n")
 	}
 	viewMsgsLines += lines
 }

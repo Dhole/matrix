@@ -825,7 +825,7 @@ func setAllViews(g *gocui.Gui) error {
 		}
 		if err == gocui.ErrUnknownView {
 			v.Frame = false
-			v.BgColor = gocui.ColorBlue
+			//v.BgColor = gocui.ColorBlue
 		}
 		printStatusLine(v, currentRoom)
 	}
@@ -970,11 +970,13 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 			power = ""
 		}
 	}
-	fmt.Fprintf(v, "\x1b[0;37m[%s] [%s%s] %d.%v [%d] %s",
+	fmt.Fprintf(v, "\x1b[48;5;57m[%s] [%s%s] %d.%v [%d] %s",
 		time.Now().Format("15:04"),
 		power, cli.GetDisplayName(),
 		getRoomUI(currentRoom).Shortcut, currentRoom, len(currentRoom.Users.U),
 		currentRoom.Topic)
+	viewMsgsWidth, _ := v.Size()
+	fmt.Fprintf(v, "%*s", viewMsgsWidth-len(v.Buffer()), "")
 }
 
 func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {

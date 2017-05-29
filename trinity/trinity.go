@@ -306,6 +306,7 @@ func getPrevEvents(room *mor.Room) {
 		rePrintChan <- "msgs"
 		// At least load enough messages to cover the entire screen
 		if !room.HasFirstMsg && (viewMsgsLines+1 < viewMsgsHeight) {
+			// Force a new getPrevEvents due to scrolling past the top.
 			scrollChan <- -1
 			scrollChan <- +1
 		}
@@ -897,10 +898,10 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	it := r.Events.Iterator()
 	for elem := it.Next(); elem != nil; elem = it.Next() {
 		// DEBUG
-		if t, ok := elem.Value.(mor.Token); ok {
-			fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
-			viewMsgsLines++
-		}
+		//if t, ok := elem.Value.(mor.Token); ok {
+		//	fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
+		//	viewMsgsLines++
+		//}
 		if e, ok := elem.Value.(*mor.Event); ok {
 			ts := time.Unix(e.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||
@@ -1005,7 +1006,7 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 	default:
 		text = fmt.Sprintf("DEBUG:%+v", e)
 		username = strings.Repeat(" ", timelineUserWidth-10)
-		//return "", "", false
+		return "", "", false
 	}
 
 	return username, text, true

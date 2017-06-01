@@ -9,6 +9,7 @@ import (
 	"../../gocui"
 	"hash/adler32"
 	//"io"
+	//"github.com/pkg/profile"
 	"log"
 	"strings"
 	"time"
@@ -84,9 +85,11 @@ func getRoomUI(r *mor.Room) *RoomUI {
 }
 
 type RoomsUI struct {
-	ByShortcut  map[int]*mor.Room
-	PeopleRooms []*mor.Room
-	GroupRooms  []*mor.Room
+	ByShortcut   map[int]*mor.Room
+	PeopleRooms  []*mor.Room
+	GroupRooms   []*mor.Room
+	InvitedRooms []*mor.Room
+	LeftRooms    []*mor.Room
 }
 
 func initRoomsUI(rs *mor.Rooms) {
@@ -102,10 +105,12 @@ func UpdateShortcuts(rs *mor.Rooms) {
 	rsUI.ByShortcut = make(map[int]*mor.Room)
 	rsUI.PeopleRooms = make([]*mor.Room, 0)
 	rsUI.GroupRooms = make([]*mor.Room, 0)
+	rsUI.InvitedRooms = make([]*mor.Room, 0)
+	rsUI.LeftRooms = make([]*mor.Room, 0)
 	count := 0
 	rsUI.ByShortcut[0] = rs.ConsoleRoom
 	for _, r := range rs.R[1:] {
-		if len(r.Users.U) == 2 {
+		if len(r.Users.U) == 2 && r.Mem == mor.MemJoin {
 			count++
 			rUI := getRoomUI(r)
 			rUI.Shortcut = count
@@ -114,11 +119,29 @@ func UpdateShortcuts(rs *mor.Rooms) {
 		}
 	}
 	for _, r := range rs.R[1:] {
-		if len(r.Users.U) != 2 {
+		if len(r.Users.U) != 2 && r.Mem == mor.MemJoin {
 			count++
 			rUI := getRoomUI(r)
 			rUI.Shortcut = count
 			rsUI.GroupRooms = append(rsUI.GroupRooms, r)
+			rsUI.ByShortcut[rUI.Shortcut] = r
+		}
+	}
+	for _, r := range rs.R[1:] {
+		if r.Mem == mor.MemInvite {
+			count++
+			rUI := getRoomUI(r)
+			rUI.Shortcut = count
+			rsUI.InvitedRooms = append(rsUI.InvitedRooms, r)
+			rsUI.ByShortcut[rUI.Shortcut] = r
+		}
+	}
+	for _, r := range rs.R[1:] {
+		if r.Mem == mor.MemLeave {
+			count++
+			rUI := getRoomUI(r)
+			rUI.Shortcut = count
+			rsUI.LeftRooms = append(rsUI.LeftRooms, r)
 			rsUI.ByShortcut[rUI.Shortcut] = r
 		}
 	}
@@ -297,6 +320,9 @@ func getPrevEvents(room *mor.Room) {
 	// Fetch previous messages
 	count, err := cli.GetPrevEvents(currentRoom, uint(viewMsgsHeight*2))
 	if err != nil || count == 0 {
+		if err != nil {
+			fmt.Fprintln(debugBuf, "cli.GetPrevEvents:", err)
+		}
 		if currentRoom == room {
 			scrollChan <- 0
 		}
@@ -538,9 +564,6 @@ func AddedRoom(r *mor.Room) {
 	roomUI.ScrollBottom = true
 	//rUI := getRoomUI(r)
 	//UpdatedRoom(r)
-	if started {
-		UpdateShortcuts(&cli.Rs)
-	}
 }
 
 func DeletedRoom(r *mor.Room) {
@@ -559,9 +582,12 @@ func DeletedRoom(r *mor.Room) {
 	}
 }
 
-func UpdatedRoom(r *mor.Room) {
+func UpdatedRoom(r *mor.Room, state mor.RoomState) {
 	//rUI := getRoomUI(r)
 	if started {
+		if state == mor.RoomStateMembership || state == mor.RoomStateAll {
+			UpdateShortcuts(&cli.Rs)
+		}
 		rePrintChan <- "rooms"
 		if currentRoom == r {
 			rePrintChan <- "statusline"
@@ -584,6 +610,7 @@ func Cmd(r *mor.Room, args []string) {
 }
 
 func main() {
+	//defer profile.Start().Stop()
 	var err error
 	cli, err = mor.NewClient("morpheus", []string{"."}, mor.Callbacks{
 		AddedUser, DeletedUser, UpdatedUser,
@@ -594,6 +621,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	debugBuf = cli.DebugBuf
 
 	//
 	// Init
@@ -857,7 +885,8 @@ func printRooms(v *gocui.View) {
 		pad = 2
 	}
 	rsUI := getRoomsUI(rs)
-	roomSets := [][]*mor.Room{[]*mor.Room{rs.ConsoleRoom}, rsUI.PeopleRooms, rsUI.GroupRooms}
+	roomSets := [][]*mor.Room{[]*mor.Room{rs.ConsoleRoom},
+		rsUI.PeopleRooms, rsUI.GroupRooms, rsUI.InvitedRooms, rsUI.LeftRooms}
 	for i, roomSet := range roomSets {
 		if len(roomSet) != 0 {
 			switch i {
@@ -865,6 +894,10 @@ func printRooms(v *gocui.View) {
 				fmt.Fprintf(v, "\n    People\n\n")
 			case 2:
 				fmt.Fprintf(v, "\n    Groups\n\n")
+			case 3:
+				fmt.Fprintf(v, "\n    Invited\n\n")
+			case 4:
+				fmt.Fprintf(v, "\n    Left\n\n")
 			}
 		}
 		for _, r := range roomSet {

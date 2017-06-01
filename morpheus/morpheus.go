@@ -59,21 +59,25 @@ func prependRoomEvents(r *Room, events []gomatrix.Event) uint {
 }
 
 func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
+	r.ExpBackoff.Wait()
 	count := uint(0)
 	if r.Events.Len() == 0 {
+		r.ExpBackoff.Inc()
 		return 0, fmt.Errorf("Events is empty")
 	}
 	token, ok := r.Events.Front().Value.(Token)
 	if !ok {
+		r.ExpBackoff.Inc()
 		return 0, fmt.Errorf("Top Event is not a token")
 	}
 	start := string(token)
 	end := ""
-	//for {
 	resMessages, err := c.cli.Messages(r.ID, start, end, 'b', int(num))
 	if err != nil {
+		r.ExpBackoff.Inc()
 		return 0, err
 	}
+	r.ExpBackoff.Reset()
 	if len(resMessages.Chunk) < int(num) {
 		r.HasFirstMsg = true
 		if len(resMessages.Chunk) == 0 {
@@ -123,7 +127,11 @@ func (c *Client) GetDisplayName() string {
 }
 
 func (c *Client) AddRoom(roomID, name, canonAlias, topic string) (*Room, error) {
-	return c.Rs.Add(&c.cfg.UserID, roomID, name, canonAlias, topic)
+	r, err := c.Rs.Add(&c.cfg.UserID, roomID, MemJoin)
+	r.SetName(name)
+	r.SetCanonAlias(canonAlias)
+	r.SetTopic(topic)
+	return r, err
 }
 
 func (c *Client) ConsolePrintf(format string, args ...interface{}) {
@@ -328,7 +336,7 @@ func (c *Client) Sync() error {
 
 func (c *Client) update(res *gomatrix.RespSync) {
 	for roomID, roomData := range res.Rooms.Join {
-		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
+		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemJoin)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}
@@ -339,13 +347,13 @@ func (c *Client) update(res *gomatrix.RespSync) {
 		r.PushToken(res.NextBatch)
 	}
 	for roomID, roomData := range res.Rooms.Invite {
-		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
+		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemInvite)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}
 	}
 	for roomID, roomData := range res.Rooms.Leave {
-		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, "", "", "")
+		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemLeave)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}

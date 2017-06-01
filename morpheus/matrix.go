@@ -122,6 +122,16 @@ const (
 	MemBan    Membership = iota
 )
 
+type RoomState int
+
+const (
+	RoomStateAll        RoomState = iota
+	RoomStateName       RoomState = iota
+	RoomStateDispName   RoomState = iota
+	RoomStateTopic      RoomState = iota
+	RoomStateMembership RoomState = iota
+)
+
 type User struct {
 	ID       string
 	Name     string
@@ -261,6 +271,35 @@ func (us *Users) SetUserName(u *User, name string) {
 	us.Room.Rooms.call.UpdateUser(us.Room, u)
 }
 
+type ExpBackoff struct {
+	t   uint32
+	max uint32
+}
+
+func NewExpBackoff(max uint32) ExpBackoff {
+	return ExpBackoff{0, max}
+}
+
+func (eb *ExpBackoff) Inc() {
+	if eb.t == 0 {
+		eb.t = 200
+		return
+	}
+	if eb.t < eb.max {
+		eb.t *= 2
+	}
+}
+
+func (eb *ExpBackoff) Wait() {
+	if eb.t != 0 {
+		time.Sleep(time.Duration(eb.t) * time.Millisecond)
+	}
+}
+
+func (eb *ExpBackoff) Reset() {
+	eb.t = 0
+}
+
 type Room struct {
 	ID         string
 	Name       string
@@ -274,23 +313,26 @@ type Room struct {
 	tokensLen   int
 	HasFirstMsg bool
 	HasLastMsg  bool
-	// TODO: Add mutex to manipulate Msgs
-	myUserID *string
+	myUserID    *string
+	Mem         Membership
 
-	Rooms *Rooms
-	rwm   sync.RWMutex
-	UI    interface{}
+	Rooms      *Rooms
+	rwm        sync.RWMutex
+	ExpBackoff ExpBackoff
+	UI         interface{}
 }
 
-func NewRoom(rs *Rooms, id, name, canonAlias, topic string) (r *Room) {
+func NewRoom(rs *Rooms, id string, mem Membership, name, canonAlias, topic string) (r *Room) {
 	r = &Room{}
 	r.ID = id
+	r.Mem = mem
 	r.Name = name
 	r.CanonAlias = canonAlias
 	r.Topic = topic
 	r.Users = newUsers(r)
 	r.Events = NewEvents()
 	r.Rooms = rs
+	r.ExpBackoff = NewExpBackoff(30000)
 	return r
 }
 
@@ -308,7 +350,7 @@ func (r *Room) updateDispName(myUserID string) {
 	prevDispName := r.DispName
 	defer func() {
 		if r.DispName != prevDispName {
-			r.Rooms.call.UpdateRoom(r)
+			r.Rooms.call.UpdateRoom(r, RoomStateDispName)
 		}
 	}()
 	if r.Name != "" {
@@ -440,6 +482,20 @@ func (r *Room) SetCanonAlias(alias string) {
 	r.updateDispName(*r.myUserID)
 }
 
+func (r *Room) SetTopic(topic string) {
+	r.rwm.Lock()
+	r.Topic = topic
+	r.rwm.Unlock()
+	r.Rooms.call.UpdateRoom(r, RoomStateTopic)
+}
+
+func (r *Room) SetMembership(mem Membership) {
+	r.rwm.Lock()
+	r.Mem = mem
+	r.rwm.Unlock()
+	r.Rooms.call.UpdateRoom(r, RoomStateMembership)
+}
+
 func (r *Room) PushToken(token string) {
 	r.Events.PushBack(Token(token))
 	r.tokensLen++
@@ -527,7 +583,7 @@ type Callbacks struct {
 
 	AddRoom    func(r *Room)
 	DelRoom    func(r *Room)
-	UpdateRoom func(r *Room)
+	UpdateRoom func(r *Room, state RoomState)
 
 	ArrvMessage func(r *Room, e *Event)
 
@@ -571,14 +627,15 @@ func NewRooms(call Callbacks) (rs Rooms) {
 	return rs
 }
 
-func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (*Room, error) {
+func (rs *Rooms) Add(myUserID *string, roomID string, mem Membership) (*Room, error) {
 	rs.rwm.Lock()
 	r, ok := rs.byID[roomID]
 	if ok {
+		r.SetMembership(mem)
 		rs.rwm.Unlock()
 		return r, fmt.Errorf("Room %v already exists", roomID)
 	}
-	r = NewRoom(rs, roomID, name, canonAlias, topic)
+	r = NewRoom(rs, roomID, mem, "", "", "")
 	r.myUserID = myUserID
 	rs.R = append(rs.R, r)
 	rs.byID[r.ID] = r
@@ -589,7 +646,7 @@ func (rs *Rooms) Add(myUserID *string, roomID, name, canonAlias, topic string) (
 
 	rs.call.AddRoom(r)
 	r.updateDispName(*r.myUserID)
-	rs.call.UpdateRoom(r)
+	rs.call.UpdateRoom(r, RoomStateAll)
 	return r, nil
 }
 
@@ -622,7 +679,7 @@ func (rs *Rooms) SetRoomName(r *Room, name string) {
 	// TODO
 	// TODO: What if there are two rooms with the same name?
 	rs.rwm.Unlock()
-	rs.call.UpdateRoom(r)
+	rs.call.UpdateRoom(r, RoomStateName)
 }
 
 func (rs *Rooms) AddConsoleMessage(msgType string, content map[string]interface{}) error {

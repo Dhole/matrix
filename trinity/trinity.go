@@ -175,8 +175,6 @@ var cli *mor.Client
 var currentRoom *mor.Room
 var lastRoom *mor.Room
 
-var debugBuf *bytes.Buffer
-
 var readLineEditor gocui.Editor = gocui.EditorFunc(readLine)
 var readMultiLineEditor gocui.Editor = gocui.EditorFunc(readMultiLine)
 
@@ -321,7 +319,7 @@ func getPrevEvents(room *mor.Room) {
 	count, err := cli.GetPrevEvents(currentRoom, uint(viewMsgsHeight*2))
 	if err != nil || count == 0 {
 		if err != nil {
-			fmt.Fprintln(debugBuf, "cli.GetPrevEvents:", err)
+			cli.DebugPrint("cli.GetPrevEvents:", err)
 		}
 		if currentRoom == room {
 			scrollChan <- 0
@@ -348,7 +346,7 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 			newY = 0
 			room := currentRoom
 			roomUI := getRoomUI(room)
-			if currentRoom.HasFirstMsg {
+			if currentRoom.HasFirstMsg || currentRoom.Mem == mor.MemInvite {
 				newY = 1
 			} else if roomUI.TryGettingPrev() {
 				go getPrevEvents(room)
@@ -403,7 +401,7 @@ func printView(g *gocui.Gui, view string) {
 			v, err := g.View(view)
 			if err == nil {
 				v.Clear()
-				fmt.Fprint(v, debugBuf)
+				fmt.Fprint(v, cli.DebugBuf())
 			}
 		}
 	}
@@ -485,15 +483,18 @@ func cmdLoop(g *gocui.Gui) {
 		case "quit":
 			g.Execute(quit)
 		case "join":
-			if len(args.Args) != 2 {
-				cli.ConsolePrintf("Usage: %s roomIDorAlias", args.Args[0])
+			roomID := roomIDCmd(args)
+			if roomID == "" {
+				cli.ConsolePrintf(mor.MsgTxtTypeText,
+					"Usage: %s roomIDorAlias", args.Args[0])
 			} else {
-				go cli.JoinRoom(args.Args[1])
+				go cli.JoinRoom(roomID)
 			}
 		case "leave":
 			roomID := roomIDCmd(args)
 			if roomID == "" {
-				cli.ConsolePrintf("Usage: %s roomID", args.Args[0])
+				cli.ConsolePrintf(mor.MsgTxtTypeText,
+					"Usage: %s roomID", args.Args[0])
 				return
 			}
 			go cli.LeaveRoom(roomID)
@@ -521,7 +522,8 @@ func cmdLoop(g *gocui.Gui) {
 			})
 
 		default:
-			cli.ConsolePrintf("Unknown command: %s", args.Args[0])
+			cli.ConsolePrintf(mor.MsgTxtTypeText,
+				"Unknown command: %s", args.Args[0])
 		}
 	}
 }
@@ -621,7 +623,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	debugBuf = cli.DebugBuf
 
 	//
 	// Init
@@ -931,10 +932,10 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	it := r.Events.Iterator()
 	for elem := it.Next(); elem != nil; elem = it.Next() {
 		// DEBUG
-		//if t, ok := elem.Value.(mor.Token); ok {
-		//	fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
-		//	viewMsgsLines++
-		//}
+		if t, ok := elem.Value.(mor.Token); ok {
+			fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
+			viewMsgsLines++
+		}
 		if e, ok := elem.Value.(*mor.Event); ok {
 			ts := time.Unix(e.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||
@@ -986,7 +987,19 @@ func printRoomUsers(v *gocui.View, r *mor.Room) {
 		//color := nick256Colors[u.DispNameHash%uint32(len(nick256Colors))]
 		//username := fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, u.DispName)
 		//fmt.Fprintf(v, "%s%s\n", power, username)
-		fmt.Fprintf(v, "%s%s\n", power, u)
+		if u.Mem == mor.MemJoin {
+			fmt.Fprintf(v, "%s%s\n", power, u)
+		}
+	}
+	printInvite := false
+	for _, u := range r.Users.U {
+		if u.Mem == mor.MemInvite {
+			if !printInvite {
+				fmt.Fprintf(v, "\n    Invited\n\n")
+				printInvite = true
+			}
+			fmt.Fprintf(v, " %s\n", u)
+		}
 	}
 }
 
@@ -1003,11 +1016,11 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 			power = ""
 		}
 	}
-	fmt.Fprintf(v, "\x1b[48;5;57m[%s] [%s%s] %d.%v [%d] %s",
-		time.Now().Format("15:04"),
-		power, cli.GetDisplayName(),
-		getRoomUI(currentRoom).Shortcut, currentRoom, len(currentRoom.Users.U),
-		currentRoom.Topic)
+	fmt.Fprintf(v, "\x1b[48;5;57m[%s] [%s%s] %d.%v (%s) [joined:%d, invited:%d] %s",
+		time.Now().Format("15:04"), power, cli.GetDisplayName(),
+		getRoomUI(currentRoom).Shortcut, currentRoom, currentRoom.ID,
+		currentRoom.Users.MemCount[mor.MemJoin], currentRoom.Users.MemCount[mor.MemInvite],
+		strings.Replace(currentRoom.Topic, "\n", " ", -1))
 	viewMsgsWidth, _ := v.Size()
 	fmt.Fprintf(v, "%*s", viewMsgsWidth-len(v.Buffer()), "")
 }
@@ -1033,15 +1046,24 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 		username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
 		switch mc := ec.Content.(type) {
 		case mor.TextMessage:
-			text = mc.Body
-			text = strings.Replace(text, "\x1b", "\\x1b", -1)
+			body := strings.Replace(mc.Body, "\x1b", "\\x1b", -1)
+			switch mc.Type {
+			case mor.MsgTxtTypeText:
+				text = body
+			case mor.MsgTxtTypeEmote:
+				username = strPadLeft("*", timelineUserWidth-10, ' ')
+				text = fmt.Sprintf("%s %s", u.String(), body)
+			case mor.MsgTxtTypeNotice:
+				text = fmt.Sprintf("\x1b[38;5;246m%s\x1b[0;0m", body)
+			}
 		default:
 			text = fmt.Sprintf("msgtype %s not supported yet", ec.MsgType)
 		}
 	default:
-		text = fmt.Sprintf("DEBUG:%+v", e)
-		username = strings.Repeat(" ", timelineUserWidth-10)
-		return "", "", false
+		text = fmt.Sprintf("%+v", e)
+		username = strPadLeft("DEBUG", timelineUserWidth-10, ' ')
+		username = fmt.Sprintf("\x1b[38;9;%dm%s\x1b[0;0m", username)
+		//return "", "", false
 	}
 
 	return username, text, true
@@ -1134,7 +1156,7 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 			viewDebug.Title = "Debug"
 			viewDebug.Wrap = true
 		}
-		fmt.Fprint(viewDebug, debugBuf)
+		fmt.Fprint(viewDebug, cli.DebugBuf())
 		g.SetViewOnTop("debug")
 	}
 	return nil

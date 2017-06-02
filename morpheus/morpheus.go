@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/matrix-org/gomatrix"
+	"sync"
 	"time"
 	//"github.com/pkg/profile"
 	"github.com/spf13/viper"
@@ -90,33 +91,33 @@ func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 }
 
 // TODO: Remove this function and get room data from the state returned by the initial sync!
-func (c *Client) loadRoomAndData(roomID string) {
-	res := NewGenMap()
-	c.cli.StateEvent(roomID, "m.room.name", "", &res)
-	name := res.StringKey("name")
-	c.cli.StateEvent(roomID, "m.room.topic", "", &res)
-	topic := res.StringKey("topic")
-	c.cli.StateEvent(roomID, "m.room.canonical_alias", "", &res)
-	canonicalAlias := res.StringKey("alias")
-	c.ConsolePrintf("Adding room (%s) %s \"%s\": %s",
-		roomID, canonicalAlias, name, topic)
-	r, _ := c.AddRoom(roomID, name, canonicalAlias, topic)
-	resJoinedMem, err := c.cli.JoinedMembers(roomID)
-	if err != nil {
-		panic(err)
-	}
-	//fmt.Println(roomID, "Batch add")
-	for userID, userData := range resJoinedMem.Joined {
-		username := ""
-		if userData.DisplayName != nil {
-			username = *userData.DisplayName
-		}
-		r.Users.AddBatch(userID, username, 0, MemJoin)
-	}
-	//fmt.Println(roomID, "Batch add complete")
-	r.Users.AddBatchFinish()
-	//fmt.Println(roomID, "Batch finish complete")
-}
+//func (c *Client) loadRoomAndData(roomID string) {
+//	res := NewGenMap()
+//	c.cli.StateEvent(roomID, "m.room.name", "", &res)
+//	name := res.StringKey("name")
+//	c.cli.StateEvent(roomID, "m.room.topic", "", &res)
+//	topic := res.StringKey("topic")
+//	c.cli.StateEvent(roomID, "m.room.canonical_alias", "", &res)
+//	canonicalAlias := res.StringKey("alias")
+//	c.ConsolePrintf("Adding room (%s) %s \"%s\": %s",
+//		roomID, canonicalAlias, name, topic)
+//	r, _ := c.AddRoom(roomID, name, canonicalAlias, topic)
+//	resJoinedMem, err := c.cli.JoinedMembers(roomID)
+//	if err != nil {
+//		panic(err)
+//	}
+//	//fmt.Println(roomID, "Batch add")
+//	for userID, userData := range resJoinedMem.Joined {
+//		username := ""
+//		if userData.DisplayName != nil {
+//			username = *userData.DisplayName
+//		}
+//		r.Users.Add(userID, username, 0, MemJoin)
+//	}
+//	//fmt.Println(roomID, "Batch add complete")
+//	//r.Users.AddBatchFinish()
+//	//fmt.Println(roomID, "Batch finish complete")
+//}
 
 func (c *Client) GetUserID() string {
 	return c.cfg.UserID
@@ -134,20 +135,41 @@ func (c *Client) AddRoom(roomID, name, canonAlias, topic string) (*Room, error) 
 	return r, err
 }
 
-func (c *Client) ConsolePrintf(format string, args ...interface{}) {
-	c.Rs.AddConsoleTextMessage(fmt.Sprintf(format, args...))
+func (c *Client) ConsolePrintf(txtType MsgTxtType, format string, args ...interface{}) {
+	c.Rs.AddConsoleTextMessage(txtType, fmt.Sprintf(format, args...))
 }
 
-func (c *Client) ConsolePrint(args ...interface{}) {
-	c.Rs.AddConsoleTextMessage(fmt.Sprint(args...))
+func (c *Client) ConsolePrint(txtType MsgTxtType, args ...interface{}) {
+	c.Rs.AddConsoleTextMessage(txtType, fmt.Sprint(args...))
+}
+
+func (c *Client) DebugPrintf(format string, args ...interface{}) {
+	c.debugBufMux.Lock()
+	fmt.Fprint(c.debugBuf, "\x1b[38;5;110m", time.Now().Format("15:04:05"), "\x1b[0;0m", " ")
+	fmt.Fprintf(c.debugBuf, format, args...)
+	fmt.Fprint(c.debugBuf, "\n")
+	c.debugBufMux.Unlock()
+}
+
+func (c *Client) DebugPrint(args ...interface{}) {
+	c.debugBufMux.Lock()
+	fmt.Fprint(c.debugBuf, "\x1b[38;5;110m", time.Now().Format("15:04:05"), "\x1b[0;0m", " ")
+	fmt.Fprint(c.debugBuf, args...)
+	fmt.Fprint(c.debugBuf, "\n")
+	c.debugBufMux.Unlock()
+}
+
+func (c *Client) DebugBuf() *bytes.Buffer {
+	return c.debugBuf
 }
 
 type Client struct {
-	cli      *gomatrix.Client
-	cfg      Config
-	Rs       Rooms
-	DebugBuf *bytes.Buffer
-	minMsgs  uint
+	cli         *gomatrix.Client
+	cfg         Config
+	Rs          Rooms
+	debugBuf    *bytes.Buffer
+	debugBufMux sync.Mutex
+	minMsgs     uint
 
 	exit chan error
 
@@ -180,7 +202,7 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	c.cfg.UserID = fmt.Sprintf("@%s:%s", c.cfg.Username,
 		strings.TrimPrefix(c.cfg.Homeserver, "https://"))
 
-	c.DebugBuf = bytes.NewBufferString("")
+	c.debugBuf = bytes.NewBufferString("")
 	c.minMsgs = 50
 	cli, _ := gomatrix.NewClient(c.cfg.Homeserver, "", "")
 	c.cli = cli
@@ -204,8 +226,8 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 // TODO: Handle error, maybe hold message if unsuccesful
 func (c *Client) SendText(roomID, body string) {
 	if roomID == c.Rs.consoleRoomID || body[0] == '/' {
-		c.Rs.ConsoleRoom.PushTextMessage(txnID(), time.Now().Unix()*1000,
-			c.cfg.UserID, body)
+		c.Rs.ConsoleRoom.PushTextMessage(MsgTxtTypeText, txnID(),
+			time.Now().Unix()*1000, c.cfg.UserID, body)
 		body = strings.TrimPrefix(body, "/")
 		args := strings.Fields(body)
 		if len(args) < 1 {
@@ -215,7 +237,7 @@ func (c *Client) SendText(roomID, body string) {
 	} else {
 		_, err := c.cli.SendText(roomID, body)
 		if err != nil {
-			c.ConsolePrint("send:", err)
+			c.ConsolePrint(MsgTxtTypeNotice, "send:", err)
 			return
 		}
 	}
@@ -223,13 +245,13 @@ func (c *Client) SendText(roomID, body string) {
 
 // TODO: Return error
 func (c *Client) JoinRoom(roomIDorAlias string) {
-	resJoin, err := c.cli.JoinRoom(roomIDorAlias, "", nil)
+	_, err := c.cli.JoinRoom(roomIDorAlias, "", nil)
 	if err != nil {
-		c.ConsolePrint("join:", err)
+		c.ConsolePrint(MsgTxtTypeNotice, "join:", err)
 		return
 	}
-	roomID := resJoin.RoomID
-	c.loadRoomAndData(roomID)
+	//roomID := resJoin.RoomID
+	//c.loadRoomAndData(roomID)
 	// TODO: Notify UI of new joined room
 }
 
@@ -237,22 +259,22 @@ func (c *Client) JoinRoom(roomIDorAlias string) {
 func (c *Client) LeaveRoom(roomID string) {
 	_, err := c.cli.LeaveRoom(roomID)
 	if err != nil {
-		c.ConsolePrint("leave:", err)
+		c.ConsolePrint(MsgTxtTypeNotice, "leave:", err)
 		return
 	}
 	// TODO: Figure out if room datastructure should be removed or not
 	//r, err := c.Rs.Del(roomID)
 	r := c.Rs.ByID(roomID)
 	if r == nil {
-		c.ConsolePrint("leave:", roomID, "not found")
+		c.ConsolePrint(MsgTxtTypeNotice, "leave:", roomID, "not found")
 		return
 	}
-	c.ConsolePrintf("Left room (%s) %s", roomID, r.DispName)
+	c.ConsolePrintf(MsgTxtTypeNotice, "Left room (%s) %s", roomID, r.DispName)
 	// TODO: Notify UI of left room
 }
 
 func (c *Client) Login() error {
-	c.ConsolePrintf("Logging in to %s ...", c.cfg.Homeserver)
+	c.ConsolePrintf(MsgTxtTypeNotice, "Logging in to %s ...", c.cfg.Homeserver)
 	res, err := c.cli.Login(&gomatrix.ReqLogin{
 		Type:     "m.login.password",
 		User:     c.cfg.Username,
@@ -263,21 +285,21 @@ func (c *Client) Login() error {
 	}
 
 	//fmt.Println("Token:", res.AccessToken)
-	c.ConsolePrintf("Logged in to %s", c.cfg.Homeserver)
-	fmt.Fprintf(c.DebugBuf, "AccessToken:\n%s", res.AccessToken)
+	c.ConsolePrintf(MsgTxtTypeNotice, "Logged in to %s", c.cfg.Homeserver)
+	c.DebugPrintf("AccessToken:\n%s", res.AccessToken)
 	c.cli.SetCredentials(res.UserID, res.AccessToken)
 
 	return nil
 }
 
 func (c *Client) Sync() error {
-	c.ConsolePrint("Doing initial sync request ...")
+	c.ConsolePrint(MsgTxtTypeNotice, "Doing initial sync request ...")
 	//`{"room":{"timeline":{"limit":50}}}`
 	res, err := c.cli.SyncRequest(30000, "", "", false, "online")
 	if err != nil {
 		return err
 	}
-	c.ConsolePrint("Initial sync request finished")
+	c.ConsolePrint(MsgTxtTypeNotice, "Initial sync request finished")
 	//fmt.Println("Joined rooms...")
 	c.update(res)
 	//for roomID, roomHist := range res.Rooms.Join {
@@ -302,7 +324,7 @@ func (c *Client) Sync() error {
 	//	//for _, ev := range roomHist.State.Events {
 	//	//}
 	//}
-	c.ConsolePrint("Finished loading rooms")
+	c.ConsolePrint(MsgTxtTypeNotice, "Finished loading rooms")
 	// TODO: Populate invited rooms
 	//for roomID, roomHist := range res.Rooms.Invite {
 	// NOTE: Don't display state events in the timeline
@@ -339,18 +361,28 @@ func (c *Client) update(res *gomatrix.RespSync) {
 		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemJoin)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
+			//if err != nil && roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
+			//	c.DebugPrintf("%v - %+v", err, ev)
+			//}
 		}
 		r.PushToken(roomData.Timeline.PrevBatch)
 		for _, ev := range roomData.Timeline.Events {
 			r.PushEvent(&ev)
 		}
 		r.PushToken(res.NextBatch)
+		if roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
+			c.DebugPrintf("%+v", roomData.State)
+			c.DebugPrintf("%+v", roomData.Timeline)
+		}
 	}
 	for roomID, roomData := range res.Rooms.Invite {
 		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemInvite)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}
+		//if roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
+		//	c.DebugPrintf("invite %+v", roomData)
+		//}
 	}
 	for roomID, roomData := range res.Rooms.Leave {
 		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemLeave)
@@ -362,6 +394,9 @@ func (c *Client) update(res *gomatrix.RespSync) {
 			r.PushEvent(&ev)
 		}
 		r.PushToken(res.NextBatch)
+		//if roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
+		//	c.DebugPrintf("leave %+v", roomData)
+		//}
 	}
 }
 

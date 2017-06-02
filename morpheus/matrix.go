@@ -96,8 +96,17 @@ func (evsIt *EventsIterator) Next() *list.Element {
 	return evsIt.cur
 }
 
+type MsgTxtType int
+
+const (
+	MsgTxtTypeText   MsgTxtType = iota
+	MsgTxtTypeEmote  MsgTxtType = iota
+	MsgTxtTypeNotice MsgTxtType = iota
+)
+
 type TextMessage struct {
 	Body string
+	Type MsgTxtType
 }
 
 type StateRoomName struct {
@@ -108,6 +117,10 @@ type StateRoomCanonAlias struct {
 	Alias string
 }
 
+type StateRoomTopic struct {
+	Topic string
+}
+
 type StateRoomMember struct {
 	Name       string
 	Membership Membership
@@ -116,11 +129,27 @@ type StateRoomMember struct {
 type Membership int
 
 const (
-	MemInvite Membership = iota
-	MemJoin   Membership = iota
-	MemLeave  Membership = iota
-	MemBan    Membership = iota
+	MemInvite     Membership = iota
+	MemJoin       Membership = iota
+	MemLeave      Membership = iota
+	MemBan        Membership = iota
+	MembershipLen Membership = iota
 )
+
+func (mem Membership) String() string {
+	switch mem {
+	case MemInvite:
+		return "MemInvite"
+	case MemJoin:
+		return "MemJoin"
+	case MemLeave:
+		return "MemLeave"
+	case MemBan:
+		return "MemBan"
+	default:
+		return ""
+	}
+}
 
 type RoomState int
 
@@ -164,7 +193,7 @@ func (u *User) updateDispName(r *Room) {
 		u.DispName = u.ID
 		return
 	}
-	if len(r.Users.byName[u.Name]) > 1 {
+	if r.Users.byNameCount[u.Name] > 1 {
 		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.ID)
 		return
 	}
@@ -172,12 +201,56 @@ func (u *User) updateDispName(r *Room) {
 	return
 }
 
+func (u *User) setName(name string, r *Room) {
+	u.rwm.Lock()
+	if u.Name == name {
+		u.rwm.Unlock()
+		return
+	} else if u.Name != "" {
+		r.Users.byNameCount[u.Name]--
+	}
+	u.Name = name
+	u.rwm.Unlock()
+	u.updateDispName(r)
+	if u.Name != "" {
+		r.Users.byNameCount[u.Name]++
+	}
+}
+
+func (u *User) setPower(power int, r *Room) {
+	u.rwm.Lock()
+	if u.Power == power {
+		u.rwm.Unlock()
+		return
+	}
+	u.Power = power
+	u.rwm.Unlock()
+}
+
+func (u *User) setMembership(mem Membership, newUser bool, r *Room) {
+	u.rwm.Lock()
+	if u.Mem == mem {
+		u.rwm.Unlock()
+		return
+	}
+	u.Mem = mem
+	if newUser {
+		r.Users.MemCountDelta(u.Mem, mem, 0, 1)
+	} else {
+		r.Users.MemCountDelta(u.Mem, mem, -1, 1)
+	}
+	u.rwm.Unlock()
+}
+
 type Users struct {
 	U []*User
 	// TODO: Concurrent write and/or read is not ok
 	byID map[string]*User
 	// TODO: Concurrent write and/or read is not ok
-	byName map[string][]*User
+	byNameCount map[string]uint
+	// TODO: Add byDispName map[string]*User
+
+	MemCount [MembershipLen]int
 
 	Room *Room
 	rwm  *sync.RWMutex
@@ -189,71 +262,97 @@ func (us *Users) ByID(id string) *User {
 	return us.byID[id]
 }
 
+func (us *Users) MemCountDelta(memOld, memNew Membership, deltaOld, deltaNew int) {
+	us.rwm.Lock()
+	us.MemCount[memOld] += deltaOld
+	us.MemCount[memNew] += deltaNew
+	us.rwm.Unlock()
+}
+
 func newUsers(r *Room) (us Users) {
 	us.U = make([]*User, 0)
 	us.byID = make(map[string]*User, 0)
-	us.byName = make(map[string][]*User, 0)
+	us.byNameCount = make(map[string]uint, 0)
 	us.Room = r
 	us.rwm = &sync.RWMutex{}
 	return us
 }
 
+// Add or Update the User
 func (us *Users) Add(id, name string, power int, mem Membership) (*User, error) {
 	us.rwm.Lock()
-	u, err := us.addBatch(id, name, power, mem)
-	if err != nil {
-		us.rwm.Unlock()
-		return nil, err
-	}
-	us.Room.Rooms.call.AddUser(us.Room, u)
-	for _, u := range us.U {
-		u.updateDispName(us.Room)
+
+	updateDispName := false
+	newUser := false
+	u := us.byID[id]
+	if u == nil {
+		updateDispName = true
+		newUser = true
+		u = &User{ID: id}
+		us.U = append(us.U, u)
+		us.byID[u.ID] = u
+		us.Room.Rooms.call.AddUser(us.Room, u)
+	} else if u.Name != name {
+		updateDispName = true
 	}
 	us.rwm.Unlock()
 
-	us.Room.updateDispName(*us.Room.myUserID)
+	u.setName(name, us.Room)
+	u.setPower(power, us.Room)
+	u.setMembership(mem, newUser, us.Room)
+
+	//return u, fmt.Errorf("User %v already exists in this room", id)
+
+	us.rwm.RLock()
+	if updateDispName {
+		for _, u := range us.U {
+			u.updateDispName(us.Room)
+		}
+	}
+	us.rwm.RUnlock()
+
+	if updateDispName {
+		us.Room.updateDispName(*us.Room.myUserID)
+	}
 	us.Room.Rooms.call.UpdateUser(us.Room, u)
 	return u, nil
 }
 
-func (us *Users) addBatch(id, name string, power int, mem Membership) (*User, error) {
-	if us.byID[id] != nil {
-		return nil, fmt.Errorf("User %v already exists in this room", id)
-	}
-	u := &User{
-		ID:       id,
-		Name:     name,
-		DispName: "",
-		Power:    power,
-		Mem:      mem,
-	}
-	us.U = append(us.U, u)
-	us.byID[u.ID] = u
-	if u.Name != "" {
-		if us.byName[u.Name] == nil {
-			us.byName[u.Name] = make([]*User, 0)
-		}
-		us.byName[u.Name] = append(us.byName[u.Name], u)
-	}
-	return u, nil
-}
+//func (us *Users) addBatch(id, name string, power int, mem Membership) (*User, error) {
+//	if u := us.byID[id]; u != nil {
+//		u.setName(name)
+//		u.setPower(power)
+//		u.setMembership(mem)
+//		return u, fmt.Errorf("User %v already exists in this room", id)
+//	}
+//	u := &User{
+//		ID:       id,
+//		Name:     name,
+//		DispName: "",
+//		Power:    power,
+//		Mem:      mem,
+//	}
+//	us.U = append(us.U, u)
+//	us.byID[u.ID] = u
+//	return u, nil
+//}
 
-func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, error) {
-	us.rwm.Lock()
-	defer us.rwm.Unlock()
-	u, err := us.addBatch(id, name, power, mem)
-	return u, err
-}
-
-func (us *Users) AddBatchFinish() {
-	us.rwm.RLock()
-	for _, u := range us.U {
-		us.Room.Rooms.call.AddUser(us.Room, u)
-		u.updateDispName(us.Room)
-	}
-	us.rwm.RUnlock()
-	us.Room.updateDispName(*us.Room.myUserID)
-}
+//func (us *Users) AddBatch(id, name string, power int, mem Membership) (*User, error) {
+//	us.rwm.Lock()
+//	defer us.rwm.Unlock()
+//	u, err := us.addBatch(id, name, power, mem)
+//	return u, err
+//}
+//
+//func (us *Users) AddBatchFinish() {
+//	us.rwm.RLock()
+//	for _, u := range us.U {
+//		us.Room.Rooms.call.AddUser(us.Room, u)
+//		u.updateDispName(us.Room)
+//	}
+//	us.rwm.RUnlock()
+//	us.Room.updateDispName(*us.Room.myUserID)
+//}
 
 func (us *Users) Del(u *User) {
 	us.rwm.Lock()
@@ -388,8 +487,22 @@ func (r *Room) updateDispName(myUserID string) {
 
 func parseMessage(msgType string, content map[string]interface{}) (interface{}, error) {
 	var cnt interface{}
+	var msgTxtType MsgTxtType
+	isMsgTxt := false
 	switch msgType {
 	case "m.text":
+		msgTxtType = MsgTxtTypeText
+		isMsgTxt = true
+	case "m.emote":
+		msgTxtType = MsgTxtTypeEmote
+		isMsgTxt = true
+	case "m.notice":
+		msgTxtType = MsgTxtTypeNotice
+		isMsgTxt = true
+	default:
+		return nil, fmt.Errorf("msgtype %s not supported yet", msgType)
+	}
+	if isMsgTxt {
 		var mc TextMessage
 		body, ok := content["body"].(string)
 		if !ok {
@@ -397,9 +510,8 @@ func parseMessage(msgType string, content map[string]interface{}) (interface{}, 
 				msgType, content)
 		}
 		mc.Body = body
+		mc.Type = msgTxtType
 		cnt = mc
-	default:
-		return nil, fmt.Errorf("msgtype %s not supported yet", msgType)
 	}
 	return cnt, nil
 }
@@ -419,11 +531,14 @@ func parseEvent(evType string, stateKey *string,
 	//case "m.room.create":
 	//case "m.room.join_rules":
 	case "m.room.member":
-		name, ok1 := content["displayname"].(string)
-		mem, ok2 := content["membership"].(string)
-		if !ok1 || !ok2 {
+		mem, ok := content["membership"].(string)
+		if !ok {
 			return nil, fmt.Errorf("Error decoding event %s with content %+v",
 				evType, content)
+		}
+		name, ok := content["displayname"].(string)
+		if !ok {
+			name = ""
 		}
 		membership := MemJoin
 		switch mem {
@@ -460,7 +575,13 @@ func parseEvent(evType string, stateKey *string,
 				evType, content)
 		}
 		cnt = StateRoomName{Name: name}
-	//case "m.room.topic":
+	case "m.room.topic":
+		topic, ok := content["topic"].(string)
+		if !ok {
+			return nil, fmt.Errorf("Error decoding event %s with content %+v",
+				evType, content)
+		}
+		cnt = StateRoomTopic{Topic: topic}
 	//case "m.room.avatar":
 	default:
 		return nil, fmt.Errorf("event %s not supported yet", evType)
@@ -520,8 +641,9 @@ func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 	return nil
 }
 
-func (r *Room) PushTextMessage(id string, ts int64, userID, body string) error {
-	e := &Event{"m.room.message", id, ts, userID, nil, Message{"m.text", TextMessage{body}}}
+func (r *Room) PushTextMessage(txtType MsgTxtType, id string, ts int64, userID, body string) error {
+	e := &Event{"m.room.message", id, ts, userID, nil,
+		Message{"m.text", TextMessage{body, txtType}}}
 	r.Events.PushBack(e)
 	//r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, e)
@@ -561,14 +683,17 @@ func (r *Room) updateState(ev *gomatrix.Event) error {
 	switch cnt := cnt.(type) {
 	case StateRoomName:
 		r.SetName(cnt.Name)
+	case StateRoomTopic:
+		r.SetTopic(cnt.Topic)
 	case StateRoomCanonAlias:
 		r.SetCanonAlias(cnt.Alias)
 	case StateRoomMember:
 		if ev.StateKey == nil || *ev.StateKey == "" {
 			return fmt.Errorf("m.room.member doesn't have a state key")
 		}
-		if cnt.Membership == MemJoin {
-			r.Users.Add(*ev.StateKey, cnt.Name, 0, cnt.Membership)
+		r.Users.Add(*ev.StateKey, cnt.Name, 0, cnt.Membership)
+		if cnt.Membership == MemLeave && ev.StateKey == r.myUserID {
+			r.SetMembership(MemLeave)
 		}
 	default:
 		return fmt.Errorf("Event type not handled yet")
@@ -627,6 +752,7 @@ func NewRooms(call Callbacks) (rs Rooms) {
 	return rs
 }
 
+// Add or Update the Room
 func (rs *Rooms) Add(myUserID *string, roomID string, mem Membership) (*Room, error) {
 	rs.rwm.Lock()
 	r, ok := rs.byID[roomID]
@@ -687,7 +813,7 @@ func (rs *Rooms) AddConsoleMessage(msgType string, content map[string]interface{
 		rs.ConsoleUserID, content)
 }
 
-func (rs *Rooms) AddConsoleTextMessage(body string) error {
-	return rs.ConsoleRoom.PushTextMessage(txnID(), time.Now().Unix()*1000,
+func (rs *Rooms) AddConsoleTextMessage(txtType MsgTxtType, body string) error {
+	return rs.ConsoleRoom.PushTextMessage(txtType, txnID(), time.Now().Unix()*1000,
 		rs.ConsoleUserID, body)
 }

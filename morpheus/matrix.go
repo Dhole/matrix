@@ -69,6 +69,24 @@ func (evs *Events) Front() *list.Element {
 	return evs.l.Front()
 }
 
+func (evs *Events) Back() *list.Element {
+	evs.rwm.RLock()
+	defer evs.rwm.RUnlock()
+	return evs.l.Back()
+}
+
+func (evs *Events) LastEvent() *Event {
+	evs.rwm.RLock()
+	defer evs.rwm.RUnlock()
+	for e := evs.l.Back(); e != nil; e = e.Prev() {
+		// do something with e.Value
+		if ev, ok := e.Value.(*Event); ok {
+			return ev
+		}
+	}
+	return nil
+}
+
 func (evs *Events) Len() int {
 	evs.rwm.RLock()
 	defer evs.rwm.RUnlock()
@@ -119,6 +137,10 @@ type StateRoomCanonAlias struct {
 
 type StateRoomTopic struct {
 	Topic string
+}
+
+type StateRoomJoinRules struct {
+	IsPublic bool
 }
 
 type StateRoomMember struct {
@@ -529,7 +551,20 @@ func parseEvent(evType string, stateKey *string,
 		}
 		cnt = StateRoomCanonAlias{Alias: alias}
 	//case "m.room.create":
-	//case "m.room.join_rules":
+	case "m.room.join_rules":
+		joinRule, ok := content["join_rule"].(string)
+		if !ok {
+			return nil, fmt.Errorf("Error decoding event %s with content %+v",
+				evType, content)
+		}
+		switch joinRule {
+		case "public":
+			cnt = StateRoomJoinRules{IsPublic: true}
+		case "invite":
+			cnt = StateRoomJoinRules{IsPublic: false}
+		default:
+			return nil, fmt.Errorf("Unhandled join_rule %s", joinRule)
+		}
 	case "m.room.member":
 		mem, ok := content["membership"].(string)
 		if !ok {

@@ -52,6 +52,7 @@ type RoomUI struct {
 	ViewMsgsOriginY int
 	ScrollBottom    bool
 	ScrollSkipMsgs  uint
+	LastEventID     string
 	//ScrollDelta         int
 	gettingPrev         bool
 	gettingPrevM        sync.Mutex
@@ -449,6 +450,11 @@ func eventLoop(g *gocui.Gui) {
 				x, _ := viewReadline.Cursor()
 				lastRoomUI.ViewReadlineBuf = viewReadline.Buffer()
 				lastRoomUI.ViewReadlineCursorX = x
+				if lastEvent := lastRoom.Events.LastEvent(); lastEvent != nil {
+					lastRoomUI.LastEventID = lastEvent.ID
+				} else {
+					lastRoomUI.LastEventID = ""
+				}
 				viewReadline.Clear()
 				viewReadline.SetOrigin(0, 0)
 				viewReadline.Write([]byte(currentRoomUI.ViewReadlineBuf))
@@ -929,13 +935,14 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	scrollDelta := 0
 	prevTs := time.Unix(0, 0)
 	prevMsgsBar := false
+	newMsgsBar := false
 	it := r.Events.Iterator()
 	for elem := it.Next(); elem != nil; elem = it.Next() {
 		// DEBUG
-		if t, ok := elem.Value.(mor.Token); ok {
-			fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
-			viewMsgsLines++
-		}
+		//if t, ok := elem.Value.(mor.Token); ok {
+		//	fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
+		//	viewMsgsLines++
+		//}
 		if e, ok := elem.Value.(*mor.Event); ok {
 			ts := time.Unix(e.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||
@@ -953,15 +960,31 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 			if prevMsgsBar {
 				prevMsgsBar = false
 			}
+			if newMsgsBar {
+				newMsgLine := " new messages "
+				prevLen := viewMsgsWidth/2 - len(newMsgLine)/2
+				afterLen := viewMsgsWidth - viewMsgsWidth/2 -
+					(len(newMsgLine) - len(newMsgLine)/2)
+				fmt.Fprintf(v, "%s%s%s%s%s\n", "\x1b[38;5;61m",
+					strings.Repeat("–", prevLen),
+					newMsgLine,
+					strings.Repeat("–", afterLen),
+					"\x1b[0;0m")
+				viewMsgsLines++
+				newMsgsBar = false
+			}
 			prevTs = ts
 			printMessage(v, e, r)
 			count++
 			if count == roomUI.ScrollSkipMsgs {
-				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;29m",
+				fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;23m",
 					strings.Repeat("–", viewMsgsWidth), "\x1b[0;0m")
 				scrollDelta = viewMsgsLines
 				viewMsgsLines++
 				prevMsgsBar = true
+			}
+			if e.ID == roomUI.LastEventID {
+				newMsgsBar = true
 			}
 		}
 	}
@@ -1062,7 +1085,7 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 	default:
 		text = fmt.Sprintf("%+v", e)
 		username = strPadLeft("DEBUG", timelineUserWidth-10, ' ')
-		username = fmt.Sprintf("\x1b[38;9;%dm%s\x1b[0;0m", username)
+		username = fmt.Sprintf("\x1b[38;5;243m%s\x1b[0;0m", username)
 		//return "", "", false
 	}
 

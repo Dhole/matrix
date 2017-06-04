@@ -251,7 +251,7 @@ func (u *User) setPower(power int, r *Room) {
 
 func (u *User) setMembership(mem Membership, newUser bool, r *Room) {
 	u.rwm.Lock()
-	if u.Mem == mem {
+	if u.Mem == mem && !newUser {
 		u.rwm.Unlock()
 		return
 	}

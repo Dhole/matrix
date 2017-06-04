@@ -56,6 +56,8 @@ type RoomUI struct {
 	//ScrollDelta         int
 	gettingPrev         bool
 	gettingPrevM        sync.Mutex
+	newMsgs             bool
+	highlight           bool
 	ViewReadlineBuf     string
 	ViewReadlineCursorX int
 }
@@ -195,6 +197,8 @@ var switchRoomChan chan bool
 var cmdChan chan Args
 
 var started bool
+
+var lastTs int64
 
 // END GLOBALS
 
@@ -460,6 +464,9 @@ func eventLoop(g *gocui.Gui) {
 				viewReadline.Write([]byte(currentRoomUI.ViewReadlineBuf))
 				viewReadline.SetCursor(currentRoomUI.ViewReadlineCursorX, 0)
 
+				currentRoomUI.newMsgs = false
+				currentRoomUI.highlight = false
+
 				printView(g, "all")
 
 				if scrollBottom {
@@ -607,6 +614,14 @@ func ArrvdMessage(r *mor.Room, e *mor.Event) {
 	if started {
 		if currentRoom == r {
 			recvMsgChan <- RoomEvent{r, e}
+		} else {
+			if _, ok := e.Content.(mor.Message); ok && e.Ts > lastTs {
+				roomUI := getRoomUI(r)
+				if !roomUI.newMsgs {
+					roomUI.newMsgs = true
+					rePrintChan <- "rooms"
+				}
+			}
 		}
 	}
 }
@@ -910,8 +925,15 @@ func printRooms(v *gocui.View) {
 		for _, r := range roomSet {
 			highStart := ""
 			highEnd := ""
+			roomUI := getRoomUI(r)
 			if r == currentRoom {
 				highStart = "\x1b[48;5;40m\x1b[38;5;0m"
+				highEnd = "\x1b[0;0m"
+			} else if roomUI.newMsgs {
+				highStart = "\x1b[38;5;226m"
+				highEnd = "\x1b[0;0m"
+			} else if roomUI.highlight {
+				highStart = "\x1b[38;5;208m"
 				highEnd = "\x1b[0;0m"
 			}
 			rUI := getRoomUI(r)

@@ -370,10 +370,10 @@ func (c *Client) update(res *gomatrix.RespSync) {
 			r.PushEvent(&ev)
 		}
 		r.PushToken(res.NextBatch)
-		if roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
-			c.DebugPrintf("%+v", roomData.State)
-			c.DebugPrintf("%+v", roomData.Timeline)
-		}
+		//if roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
+		//	c.DebugPrintf("%+v", roomData.State)
+		//	c.DebugPrintf("%+v", roomData.Timeline)
+		//}
 	}
 	for roomID, roomData := range res.Rooms.Invite {
 		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemInvite)
@@ -381,7 +381,7 @@ func (c *Client) update(res *gomatrix.RespSync) {
 			r.updateState(&ev)
 		}
 		//if roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
-		//	c.DebugPrintf("invite %+v", roomData)
+		c.DebugPrintf("invite %+v", roomData)
 		//}
 	}
 	for roomID, roomData := range res.Rooms.Leave {

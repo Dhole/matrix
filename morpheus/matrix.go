@@ -42,6 +42,7 @@ type Event struct {
 
 type Events struct {
 	l   *list.List
+	len int
 	rwm *sync.RWMutex
 }
 
@@ -60,6 +61,20 @@ func (evs *Events) PushBack(e interface{}) {
 func (evs *Events) PushFront(e interface{}) {
 	evs.rwm.Lock()
 	evs.l.PushFront(e)
+	evs.rwm.Unlock()
+}
+
+func (evs *Events) PushBackEvent(e *Event) {
+	evs.rwm.Lock()
+	evs.l.PushBack(e)
+	evs.len++
+	evs.rwm.Unlock()
+}
+
+func (evs *Events) PushFrontEvent(e *Event) {
+	evs.rwm.Lock()
+	evs.l.PushFront(e)
+	evs.len++
 	evs.rwm.Unlock()
 }
 
@@ -87,10 +102,38 @@ func (evs *Events) LastEvent() *Event {
 	return nil
 }
 
+func (evs *Events) clearFront(n int) bool {
+	evs.rwm.Lock()
+	defer evs.rwm.Unlock()
+	cnt := 0
+	remove := false
+	e := evs.l.Back()
+	for ; e != nil; e = e.Prev() {
+		if _, ok := e.Value.(Token); ok {
+			if cnt >= n {
+				remove = true
+				break
+			}
+		} else {
+			cnt++
+		}
+	}
+	if remove {
+		prev := e.Prev()
+		for prev != nil {
+			prevPrev := prev.Prev()
+			evs.l.Remove(prev)
+			prev = prevPrev
+		}
+	}
+	evs.len = cnt
+	return remove
+}
+
 func (evs *Events) Len() int {
 	evs.rwm.RLock()
 	defer evs.rwm.RUnlock()
-	return evs.l.Len()
+	return evs.len
 }
 
 func (evs *Events) Iterator() *EventsIterator {
@@ -670,7 +713,7 @@ func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 		return err
 	}
 	e := &Event{"m.room.message", id, ts, userID, nil, Message{msgType, cnt}}
-	r.Events.PushBack(e)
+	r.Events.PushBackEvent(e)
 	//r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, e)
 	return nil
@@ -679,7 +722,7 @@ func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 func (r *Room) PushTextMessage(txtType MsgTxtType, id string, ts int64, userID, body string) error {
 	e := &Event{"m.room.message", id, ts, userID, nil,
 		Message{"m.text", TextMessage{body, txtType}}}
-	r.Events.PushBack(e)
+	r.Events.PushBackEvent(e)
 	//r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, e)
 	return nil
@@ -691,7 +734,7 @@ func (r *Room) PushEvent(ev *gomatrix.Event) error {
 		return err
 	}
 	e := &Event{ev.Type, ev.ID, int64(ev.Timestamp), ev.Sender, ev.StateKey, cnt}
-	r.Events.PushBack(e)
+	r.Events.PushBackEvent(e)
 	//r.msgsLen++
 	r.Rooms.call.ArrvMessage(r, e)
 	return nil
@@ -705,9 +748,17 @@ func (r *Room) PushFrontMessage(msgType, id string, ts int64, userID string,
 		return err
 	}
 	e := &Event{"m.room.message", id, ts, userID, nil, Message{msgType, cnt}}
-	r.Events.PushFront(e)
+	r.Events.PushFrontEvent(e)
 	//r.msgsLen++
 	return nil
+}
+
+func (r *Room) ClearFrontEvents(n int) {
+	if r.Events.clearFront(n) {
+		r.rwm.Lock()
+		r.HasFirstMsg = false
+		r.rwm.Unlock()
+	}
 }
 
 func (r *Room) updateState(ev *gomatrix.Event) error {

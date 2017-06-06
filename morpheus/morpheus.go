@@ -169,7 +169,7 @@ type Client struct {
 	Rs          Rooms
 	debugBuf    *bytes.Buffer
 	debugBufMux sync.Mutex
-	minMsgs     uint
+	//minMsgs     uint
 
 	exit chan error
 
@@ -203,7 +203,7 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 		strings.TrimPrefix(c.cfg.Homeserver, "https://"))
 
 	c.debugBuf = bytes.NewBufferString("")
-	c.minMsgs = 50
+	//c.minMsgs = 50
 	cli, _ := gomatrix.NewClient(c.cfg.Homeserver, "", "")
 	c.cli = cli
 
@@ -405,6 +405,6 @@ func (c *Client) StopSync() {
 	c.exit <- nil
 }
 
-func (c *Client) SetMinMsgs(n uint) {
-	c.minMsgs = n
-}
+//func (c *Client) SetMinMsgs(n uint) {
+//	c.minMsgs = n
+//}

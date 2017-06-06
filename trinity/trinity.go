@@ -199,6 +199,8 @@ var cmdChan chan Args
 var started bool
 
 var lastTs int64
+var minMsgs int
+var numPrevEvents = 128
 
 // END GLOBALS
 
@@ -321,7 +323,7 @@ func getPrevEvents(room *mor.Room) {
 		roomUI.UnsetGettingPrev()
 	}()
 	// Fetch previous messages
-	count, err := cli.GetPrevEvents(currentRoom, uint(viewMsgsHeight*2))
+	count, err := cli.GetPrevEvents(currentRoom, uint(numPrevEvents))
 	if err != nil || count == 0 {
 		if err != nil {
 			cli.DebugPrint("cli.GetPrevEvents:", err)
@@ -364,10 +366,19 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 	viewMsgs.SetOrigin(0, newY)
 	if newY >= viewMsgsLines-viewMsgsHeight {
 		scrollBottom = true
+		if currentRoom.Events.Len() > minMsgs+numPrevEvents {
+			currentRoom.ClearFrontEvents(minMsgs)
+			rePrintChan <- "msgs"
+			scrollChan <- bottomDelta()
+		}
 	} else {
 		scrollBottom = false
 	}
 	return nil
+}
+
+func bottomDelta() int {
+	return viewMsgsLines - viewMsgsHeight
 }
 
 func scrollViewMsgsBottom(g *gocui.Gui) error {
@@ -375,7 +386,7 @@ func scrollViewMsgsBottom(g *gocui.Gui) error {
 	if err != nil {
 		return err
 	}
-	return scrollViewMsgs(viewMsgs, viewMsgsLines-viewMsgsHeight)
+	return scrollViewMsgs(viewMsgs, bottomDelta())
 }
 
 func printView(g *gocui.Gui, view string) {
@@ -533,7 +544,10 @@ func cmdLoop(g *gocui.Gui) {
 				g.DeleteView("clear")
 				return nil
 			})
-
+		case "debug-clear-front":
+			currentRoom.ClearFrontEvents(minMsgs)
+			rePrintChan <- "msgs"
+			scrollChan <- bottomDelta()
 		default:
 			cli.ConsolePrintf(mor.MsgTxtTypeText,
 				"Unknown command: %s", args.Args[0])
@@ -612,11 +626,25 @@ func UpdatedRoom(r *mor.Room, state mor.RoomState) {
 
 func ArrvdMessage(r *mor.Room, e *mor.Event) {
 	if started {
+		clearedFront := false
+		roomUI := getRoomUI(r)
+		roomScrollBottom := roomUI.ScrollBottom
 		if currentRoom == r {
-			recvMsgChan <- RoomEvent{r, e}
+			roomScrollBottom = scrollBottom
+		}
+		if currentRoom.Events.Len() > minMsgs+numPrevEvents && roomScrollBottom {
+			currentRoom.ClearFrontEvents(minMsgs)
+			clearedFront = true
+		}
+		if currentRoom == r {
+			if clearedFront {
+				rePrintChan <- "msgs"
+				scrollChan <- bottomDelta()
+			} else {
+				recvMsgChan <- RoomEvent{r, e}
+			}
 		} else {
 			if _, ok := e.Content.(mor.Message); ok && e.Ts > lastTs {
-				roomUI := getRoomUI(r)
 				if !roomUI.newMsgs {
 					roomUI.newMsgs = true
 					rePrintChan <- "rooms"
@@ -714,6 +742,16 @@ func main() {
 				return err
 			}
 			return scrollViewMsgs(viewMsgs, viewMsgsHeight/2)
+		}); err != nil {
+		log.Panicln(err)
+	}
+	if err := g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone,
+		func(g *gocui.Gui, v *gocui.View) error {
+			viewMsgs, err := g.View("msgs")
+			if err != nil {
+				return err
+			}
+			return scrollViewMsgs(viewMsgs, bottomDelta())
 		}); err != nil {
 		log.Panicln(err)
 	}
@@ -829,7 +867,8 @@ func layout(g *gocui.Gui) error {
 		//fmt.Fprintln(debugBuf, "New Size at", time.Now())
 		viewMsgs, _ := g.View("msgs")
 		printRoomMessages(viewMsgs, currentRoom)
-		cli.SetMinMsgs(uint(viewMsgsHeight * 2))
+		//cli.SetMinMsgs(uint(viewMsgsHeight * 2))
+		minMsgs = viewMsgsHeight * 4
 	}
 	if !started {
 		started = true
@@ -961,10 +1000,10 @@ func printRoomMessages(v *gocui.View, r *mor.Room) {
 	it := r.Events.Iterator()
 	for elem := it.Next(); elem != nil; elem = it.Next() {
 		// DEBUG
-		//if t, ok := elem.Value.(mor.Token); ok {
-		//	fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
-		//	viewMsgsLines++
-		//}
+		if t, ok := elem.Value.(mor.Token); ok {
+			fmt.Fprintf(v, "%s%s%s\n", "\x1b[38;5;226m-- Token: ", t, " --\x1b[0;0m")
+			viewMsgsLines++
+		}
 		if e, ok := elem.Value.(*mor.Event); ok {
 			ts := time.Unix(e.Ts/1000, 0)
 			if prevTs.Day() != ts.Day() ||

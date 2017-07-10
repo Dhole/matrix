@@ -205,6 +205,7 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	c.debugBuf = bytes.NewBufferString("")
 	//c.minMsgs = 50
 	cli, _ := gomatrix.NewClient(c.cfg.Homeserver, "", "")
+	cli.Prefix = "/_matrix/client/unstable"
 	c.cli = cli
 
 	c.Rs = NewRooms(call)

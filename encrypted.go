@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/matrix-org/gomatrix"
 	"github.com/mitchellh/mapstructure"
@@ -54,17 +55,13 @@ func main() {
 		panic(err)
 	}
 	cli.SetCredentials(res.UserID, res.AccessToken)
+	userID := res.UserID
 
 	olmAccount := olm.NewAccount()
 	fmt.Println("Identity keys:", olmAccount.IdentityKeys())
 
-	//olmSession, err := olmAccount.NewOutboundSession(theirIdentityKey, theirOneTimeKey)
-	//if err != nil {
-	//	panic(err)
-	//}
-
 	var theirUser User
-	theirUser.ID = "@dhole:matrix.org"
+	theirUser.ID = "@xxx:matrix.org"
 	theirUser.Devices = make(map[string]*Device)
 
 	respQuery, err := cli.KeysQuery(map[string][]string{theirUser.ID: []string{}}, -1)
@@ -122,6 +119,65 @@ func main() {
 	fmt.Printf("%+v\n", theirUser)
 	for _, device := range theirUser.Devices {
 		fmt.Printf("%+v\n", *device)
+	}
+
+	resp, err := cli.CreateRoom(&gomatrix.ReqCreateRoom{
+		Invite: []string{theirUser.ID},
+	})
+	roomID := resp.RoomID
+
+	if err != nil {
+		panic(err)
+	}
+
+	cli.SendMessageEvent(roomID, "m.room.message",
+		gomatrix.TextMessage{MsgType: "m.text", Body: "I'm unencrypted :("})
+
+	identityKeysJSON := olmAccount.IdentityKeys()
+	identityKeys := map[string]string{}
+	err = json.Unmarshal([]byte(identityKeysJSON), &identityKeys)
+	if err != nil {
+		panic(err)
+	}
+
+	text := "I'm encrypted :D"
+
+	for deviceID, device := range theirUser.Devices {
+		olmSession, err := olmAccount.NewOutboundSession(device.IdentityKey,
+			device.OneTimeKey)
+		if err != nil {
+			panic(err)
+		}
+
+		payload := map[string]interface{}{
+			"type":           "m.room.message",
+			"content":        gomatrix.TextMessage{MsgType: "m.text", Body: text},
+			"recipient":      theirUser.ID,
+			"sender":         userID,
+			"recipient_keys": map[string]string{"ed25519": device.SigningKey},
+			"room_id":        roomID}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(string(payloadJSON))
+		encryptMsgType, encryptedMsg := olmSession.Encrypt(string(payloadJSON))
+
+		cli.SendStateEvent(roomID, "m.room.encryption", "",
+			map[string]string{"algorithm": "m.olm.v1.curve25519-aes-sha2"})
+
+		cli.SendMessageEvent(roomID, "m.room.encrypted",
+			map[string]interface{}{
+				"algorithm": "m.olm.v1.curve25519-aes-sha2",
+				"ciphertext": map[string]map[string]interface{}{
+					device.IdentityKey: map[string]interface{}{
+						"type": encryptMsgType,
+						"body": encryptedMsg,
+					},
+				},
+				"device_id":  deviceID,
+				"sender_key": identityKeys["curve25519"],
+				"session_id": olmSession.ID()})
 	}
 
 	//	res, err := c.cli.SyncRequest(30000, "", "", false, "online")

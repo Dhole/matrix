@@ -61,7 +61,7 @@ func main() {
 	fmt.Println("Identity keys:", olmAccount.IdentityKeys())
 
 	var theirUser User
-	theirUser.ID = "@xxx:matrix.org"
+	theirUser.ID = "@dhole:matrix.org"
 	theirUser.Devices = make(map[string]*Device)
 
 	respQuery, err := cli.KeysQuery(map[string][]string{theirUser.ID: []string{}}, -1)

@@ -169,6 +169,8 @@ var readlineHeight int = 1
 
 var displayNamesID = false
 
+var lineBackgroundGray = false
+
 // END CONFIG
 
 // GLOBALS
@@ -323,17 +325,18 @@ func getPrevEvents(room *mor.Room) {
 		roomUI.UnsetGettingPrev()
 	}()
 	// Fetch previous messages
-	count, err := cli.GetPrevEvents(currentRoom, uint(numPrevEvents))
+	_currentRoom := currentRoom
+	count, err := cli.GetPrevEvents(_currentRoom, uint(numPrevEvents))
 	if err != nil || count == 0 {
 		if err != nil {
 			cli.DebugPrint("cli.GetPrevEvents:", err)
 		}
-		if currentRoom == room {
+		if _currentRoom == room {
 			scrollChan <- 0
 		}
 	}
 	roomUI.ScrollSkipMsgs += count
-	if currentRoom == room {
+	if _currentRoom == room {
 		rePrintChan <- "msgs"
 		// At least load enough messages to cover the entire screen
 		if !room.HasFirstMsg && (viewMsgsLines+1 < viewMsgsHeight) {
@@ -351,12 +354,12 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 		newY = y + l
 		if newY < 1 {
 			newY = 0
-			room := currentRoom
-			roomUI := getRoomUI(room)
-			if currentRoom.HasFirstMsg || currentRoom.Mem == mor.MemInvite {
+			_currentRoom := currentRoom
+			roomUI := getRoomUI(_currentRoom)
+			if _currentRoom.HasFirstMsg || _currentRoom.Mem == mor.MemInvite {
 				newY = 1
 			} else if roomUI.TryGettingPrev() {
-				go getPrevEvents(room)
+				go getPrevEvents(_currentRoom)
 			}
 		}
 	} else {
@@ -366,8 +369,9 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 	viewMsgs.SetOrigin(0, newY)
 	if newY >= viewMsgsLines-viewMsgsHeight {
 		scrollBottom = true
-		if currentRoom.Events.Len() > minMsgs+numPrevEvents {
-			currentRoom.ClearFrontEvents(minMsgs)
+		_currentRoom := currentRoom
+		if _currentRoom.Events.Len() > minMsgs+numPrevEvents {
+			_currentRoom.ClearFrontEvents(minMsgs)
 			rePrintChan <- "msgs"
 			scrollChan <- bottomDelta()
 		}
@@ -629,14 +633,15 @@ func ArrvdMessage(r *mor.Room, e *mor.Event) {
 		clearedFront := false
 		roomUI := getRoomUI(r)
 		roomScrollBottom := roomUI.ScrollBottom
-		if currentRoom == r {
+		_currentRoom := currentRoom
+		if _currentRoom == r {
 			roomScrollBottom = scrollBottom
 		}
-		if currentRoom.Events.Len() > minMsgs+numPrevEvents && roomScrollBottom {
-			currentRoom.ClearFrontEvents(minMsgs)
+		if _currentRoom.Events.Len() > minMsgs+numPrevEvents && roomScrollBottom {
+			_currentRoom.ClearFrontEvents(minMsgs)
 			clearedFront = true
 		}
-		if currentRoom == r {
+		if _currentRoom == r {
 			if clearedFront {
 				rePrintChan <- "msgs"
 				scrollChan <- bottomDelta()
@@ -986,6 +991,7 @@ func printRooms(v *gocui.View) {
 
 func printRoomMessages(v *gocui.View, r *mor.Room) {
 	v.Clear()
+	lineBackgroundGray = false
 	viewMsgsWidth, _ := v.Size()
 	prevLine := "--- Fetching previous messages ---"
 	fmt.Fprintln(v, strings.Repeat(" ", viewMsgsWidth/2-len(prevLine)/2),
@@ -1089,7 +1095,8 @@ func printRoomUsers(v *gocui.View, r *mor.Room) {
 
 func printStatusLine(v *gocui.View, r *mor.Room) {
 	v.Clear()
-	u := currentRoom.Users.ByID(cli.GetUserID())
+	_currentRoom := currentRoom
+	u := _currentRoom.Users.ByID(cli.GetUserID())
 	power := "!"
 	if u != nil {
 		if u.Power > 50 {
@@ -1102,9 +1109,9 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 	}
 	fmt.Fprintf(v, "\x1b[48;5;57m[%s] [%s%s] %d.%v (%s) [joined:%d, invited:%d] %s",
 		time.Now().Format("15:04"), power, cli.GetDisplayName(),
-		getRoomUI(currentRoom).Shortcut, currentRoom, currentRoom.ID,
-		currentRoom.Users.MemCount[mor.MemJoin], currentRoom.Users.MemCount[mor.MemInvite],
-		strings.Replace(currentRoom.Topic, "\n", " ", -1))
+		getRoomUI(_currentRoom).Shortcut, _currentRoom, _currentRoom.ID,
+		_currentRoom.Users.MemCount[mor.MemJoin], _currentRoom.Users.MemCount[mor.MemInvite],
+		strings.Replace(_currentRoom.Topic, "\n", " ", -1))
 	viewMsgsWidth, _ := v.Size()
 	fmt.Fprintf(v, "%*s", viewMsgsWidth-len(v.Buffer()), "")
 }
@@ -1127,7 +1134,7 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 	switch ec := e.Content.(type) {
 	case mor.Message:
 		username = strPadLeft(u.String(), timelineUserWidth-10, ' ')
-		username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, username)
+		username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[39m", color, username)
 		switch mc := ec.Content.(type) {
 		case mor.TextMessage:
 			body := strings.Replace(mc.Body, "\x1b", "\\x1b", -1)
@@ -1138,7 +1145,7 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 				username = strPadLeft("*", timelineUserWidth-10, ' ')
 				text = fmt.Sprintf("%s %s", u.String(), body)
 			case mor.MsgTxtTypeNotice:
-				text = fmt.Sprintf("\x1b[38;5;246m%s\x1b[0;0m", body)
+				text = fmt.Sprintf("\x1b[38;5;246m%s\x1b[39m", body)
 			}
 		default:
 			text = fmt.Sprintf("msgtype %s not supported yet", ec.MsgType)
@@ -1146,7 +1153,7 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 	default:
 		text = fmt.Sprintf("%+v", e)
 		username = strPadLeft("DEBUG", timelineUserWidth-10, ' ')
-		username = fmt.Sprintf("\x1b[38;5;243m%s\x1b[0;0m", username)
+		username = fmt.Sprintf("\x1b[38;5;243m%s\x1b[39m", username)
 		//return "", "", false
 	}
 
@@ -1160,11 +1167,22 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 	if !ok {
 		return
 	}
-	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[0;0m", " ",
+	// Reset all text attributes
+	fmt.Fprint(v, "\x1b[0m")
+
+	if lineBackgroundGray {
+		fmt.Fprint(v, "\x1b[48;5;235m")
+		lineBackgroundGray = false
+	} else {
+		fmt.Fprint(v, "\x1b[49m")
+		lineBackgroundGray = true
+	}
+	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[39m", " ",
 		username, " ")
 
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth
+	viewMsgWidthSpace := strings.Repeat(" ", viewMsgsWidth)
 	lines := 0
 	for i, l := range strings.Split(text, "\n") {
 		strLen := 0
@@ -1174,12 +1192,14 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 		for j, w := range strings.Split(l, " ") {
 			wLen := RuneCountInStringNoEscape(w)
 			if !utf8.ValidString(w) {
-				w = "\x1b[38;5;1m�\x1b[0;0m"
+				w = "\x1b[38;5;1m�\x1b[39m"
 				wLen = 1
 			}
 			if strLen+wLen+1 > viewMsgsWidth {
 				if strLen != 0 {
-					fmt.Fprint(v, "\n", timeLineSpace)
+					fmt.Fprintf(v, "%s\n%s",
+						viewMsgWidthSpace[:viewMsgsWidth-strLen],
+						timeLineSpace)
 					lines += 1
 					strLen = 0
 				}
@@ -1195,7 +1215,9 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 					wRunes = wRunes[end:]
 					fmt.Fprint(v, string(chunk))
 					if len(wRunes) != 0 {
-						fmt.Fprint(v, "\n", timeLineSpace)
+						fmt.Fprintf(v, "%s\n%s",
+							viewMsgWidthSpace[:viewMsgsWidth-strLen],
+							timeLineSpace)
 						lines += 1
 					}
 				}
@@ -1209,11 +1231,11 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 				strLen += wLen
 			}
 		}
-		fmt.Fprint(v, "\n")
+		fmt.Fprintf(v, "%s\n", viewMsgWidthSpace[:viewMsgsWidth-strLen])
 		lines += 1
 	}
 	if text == "" {
-		fmt.Fprint(v, "\n")
+		fmt.Fprintf(v, "%s\n", viewMsgWidthSpace)
 	}
 	viewMsgsLines += lines
 }

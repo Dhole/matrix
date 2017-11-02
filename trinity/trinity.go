@@ -10,6 +10,7 @@ import (
 	"hash/adler32"
 	//"io"
 	//"github.com/pkg/profile"
+	"github.com/mattn/go-runewidth"
 	"log"
 	"strings"
 	"time"
@@ -169,7 +170,7 @@ var readlineHeight int = 1
 
 var displayNamesID = false
 
-var lineBackgroundGray = false
+//var lineBackgroundGray = false
 
 // END CONFIG
 
@@ -296,7 +297,9 @@ func readLine(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 		if len(body) == 0 {
 			return
 		}
-		body = body[:len(body)-1]
+		// We want the line without '\n' at the end, so if v.Buffer()
+		// adds '\n' we remove it.
+		//body = body[:len(body)-1]
 		v.Clear()
 		v.SetOrigin(0, 0)
 		v.SetCursor(0, 0)
@@ -432,7 +435,7 @@ func eventLoop(g *gocui.Gui) {
 	for {
 		select {
 		case re := <-recvMsgChan:
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				viewMsgs, _ := g.View("msgs")
 				if re.Room == currentRoom {
 					printMessage(viewMsgs, re.Event, re.Room)
@@ -443,18 +446,18 @@ func eventLoop(g *gocui.Gui) {
 				return nil
 			})
 		case view := <-rePrintChan:
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				printView(g, view)
 				return nil
 			})
 		case l := <-scrollChan:
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				viewMsgs, _ := g.View("msgs")
 				scrollViewMsgs(viewMsgs, l)
 				return nil
 			})
 		case <-switchRoomChan:
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				lastRoomUI := getRoomUI(lastRoom)
 				currentRoomUI := getRoomUI(currentRoom)
 				viewMsgs, _ := g.View("msgs")
@@ -509,7 +512,7 @@ func cmdLoop(g *gocui.Gui) {
 		args := <-cmdChan
 		switch args.Args[0] {
 		case "quit":
-			g.Execute(quit)
+			g.Update(quit)
 		case "join":
 			roomID := roomIDCmd(args)
 			if roomID == "" {
@@ -529,7 +532,7 @@ func cmdLoop(g *gocui.Gui) {
 			setCurrentRoom(lastRoom, false)
 			lastRoom = currentRoom
 		case "reset": // Clear gocui artifacts from the screen
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				maxX, maxY := g.Size()
 				v, err := g.SetView("clear", -1, -1, maxX, maxY)
 				if err != nil {
@@ -544,7 +547,7 @@ func cmdLoop(g *gocui.Gui) {
 				return nil
 			})
 			time.Sleep(time.Duration(50) * time.Millisecond)
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				g.DeleteView("clear")
 				return nil
 			})
@@ -561,7 +564,7 @@ func cmdLoop(g *gocui.Gui) {
 
 func AddedUser(r *mor.Room, u *mor.User) {
 	initUserUI(u)
-	//UpdatedUser(r, u)
+	UpdatedUser(r, u)
 }
 
 func DeletedUser(r *mor.Room, u *mor.User) {
@@ -801,23 +804,21 @@ func main() {
 	}
 }
 
-func strPadLeft(s string, pLen int, pad rune) string {
-	sLen := RuneCountInStringNoEscape(s)
-	if sLen > pLen-2 {
-		// TODO: Make this utf-8
-		return s[:pLen-2] + ".."
+func strTrimPadLeft(s string, pLen int) string {
+	sLen := runewidth.StringWidth(s)
+	if sLen > pLen {
+		return runewidth.Truncate(s, pLen, "..")
 	} else {
-		return strings.Repeat(string(pad), pLen-sLen) + s
+		return runewidth.FillLeft(s, pLen)
 	}
 }
 
-func strPadRight(s string, pLen int, pad rune) string {
-	sLen := RuneCountInStringNoEscape(s)
-	if sLen > pLen-2 {
-		// TODO: Make this utf-8
-		return s[:pLen-2] + ".."
+func strTrimPadRight(s string, pLen int) string {
+	sLen := runewidth.StringWidth(s)
+	if sLen > pLen {
+		return runewidth.Truncate(s, pLen, "..")
 	} else {
-		return s + strings.Repeat(string(pad), pLen-sLen)
+		return runewidth.FillRight(s, pLen)
 	}
 }
 func setCurrentRoom(r *mor.Room, toggle bool) {
@@ -983,7 +984,7 @@ func printRooms(v *gocui.View) {
 			rUI := getRoomUI(r)
 			fmt.Fprintf(v, "%s%*s.%s%s\n", highStart, pad,
 				fmt.Sprintf("%d", rUI.Shortcut),
-				strPadRight(r.String(), viewRoomsWidth-pad, ' '),
+				strTrimPadRight(r.String(), viewRoomsWidth-pad),
 				highEnd)
 		}
 	}
@@ -991,7 +992,7 @@ func printRooms(v *gocui.View) {
 
 func printRoomMessages(v *gocui.View, r *mor.Room) {
 	v.Clear()
-	lineBackgroundGray = false
+	//lineBackgroundGray = false
 	viewMsgsWidth, _ := v.Size()
 	prevLine := "--- Fetching previous messages ---"
 	fmt.Fprintln(v, strings.Repeat(" ", viewMsgsWidth/2-len(prevLine)/2),
@@ -1075,8 +1076,8 @@ func printRoomUsers(v *gocui.View, r *mor.Room) {
 			power = "\x1b[38;5;172m+\x1b[0;0m"
 		}
 		//color := nick256Colors[u.DispNameHash%uint32(len(nick256Colors))]
-		//username := fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, u.DispName)
-		//fmt.Fprintf(v, "%s%s\n", power, username)
+		//nick := fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, u.DispName)
+		//fmt.Fprintf(v, "%s%s\n", power, nick)
 		if u.Mem == mor.MemJoin {
 			fmt.Fprintf(v, "%s%s\n", power, u)
 		}
@@ -1116,7 +1117,7 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 	fmt.Fprintf(v, "%*s", viewMsgsWidth-len(v.Buffer()), "")
 }
 
-func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
+func eventToStrings(e *mor.Event, r *mor.Room) (nick, text string) {
 	u := r.Users.ByID(e.Sender)
 	var color byte
 	var uUI *UserUI
@@ -1129,12 +1130,10 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 		color = nick256Colors[uUI.DispNameHash%uint32(len(nick256Colors))]
 	}
 
-	text := ""
-	username := ""
 	switch ec := e.Content.(type) {
 	case mor.Message:
-		username = strPadLeft(u.String(), timelineUserWidth-10, ' ')
-		username = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[39m", color, username)
+		nick = strTrimPadLeft(u.String(), timelineUserWidth-10)
+		nick = fmt.Sprintf("\x1b[38;5;%dm%s\x1b[39m", color, nick)
 		switch mc := ec.Content.(type) {
 		case mor.TextMessage:
 			body := strings.Replace(mc.Body, "\x1b", "\\x1b", -1)
@@ -1142,7 +1141,7 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 			case mor.MsgTxtTypeText:
 				text = body
 			case mor.MsgTxtTypeEmote:
-				username = strPadLeft("*", timelineUserWidth-10, ' ')
+				nick = strTrimPadLeft("*", timelineUserWidth-10)
 				text = fmt.Sprintf("%s %s", u.String(), body)
 			case mor.MsgTxtTypeNotice:
 				text = fmt.Sprintf("\x1b[38;5;246m%s\x1b[39m", body)
@@ -1152,33 +1151,43 @@ func eventToStrings(e *mor.Event, r *mor.Room) (string, string, bool) {
 		}
 	default:
 		text = fmt.Sprintf("%+v", e)
-		username = strPadLeft("DEBUG", timelineUserWidth-10, ' ')
-		username = fmt.Sprintf("\x1b[38;5;243m%s\x1b[39m", username)
+		nick = strTrimPadLeft("DEBUG", timelineUserWidth-10)
+		nick = fmt.Sprintf("\x1b[38;5;243m%s\x1b[39m", nick)
 		//return "", "", false
 	}
 
-	return username, text, true
+	return nick, text
+}
+
+func StringEscapeWidth(s string) (n int) {
+	// NOTE: Unterminated escape sequences are counted!  Be careful not to
+	// have any.
+	esc := false
+	for _, c := range s {
+		if esc {
+			n++
+		}
+		if c == '\x1b' {
+			esc = true
+		} else if esc && c == 'm' {
+			esc = false
+		}
+	}
+	return n
 }
 
 func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 	msgWidth, _ := v.Size()
 	t := time.Unix(e.Ts/1000, 0)
-	username, text, ok := eventToStrings(e, r)
-	if !ok {
-		return
-	}
+	nick, text := eventToStrings(e, r)
 	// Reset all text attributes
 	fmt.Fprint(v, "\x1b[0m")
 
-	if lineBackgroundGray {
-		fmt.Fprint(v, "\x1b[48;5;235m")
-		lineBackgroundGray = false
-	} else {
-		fmt.Fprint(v, "\x1b[49m")
-		lineBackgroundGray = true
-	}
 	fmt.Fprint(v, "\x1b[38;5;110m", t.Format("15:04:05"), "\x1b[39m", " ",
-		username, " ")
+		nick, " ")
+	//if lineBackgroundGray {
+	//	fmt.Fprint(v, "\x1b[48;5;236m")
+	//}
 
 	timeLineSpace := strings.Repeat(" ", timelineUserWidth)
 	viewMsgsWidth := msgWidth - timelineUserWidth
@@ -1188,18 +1197,24 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 		strLen := 0
 		if i != 0 {
 			fmt.Fprint(v, timeLineSpace)
+			//if lineBackgroundGray {
+			//	fmt.Fprint(v, "\x1b[48;5;236m")
+			//}
 		}
 		for j, w := range strings.Split(l, " ") {
-			wLen := RuneCountInStringNoEscape(w)
+			wLen := runewidth.StringWidth(w) - StringEscapeWidth(w)
 			if !utf8.ValidString(w) {
 				w = "\x1b[38;5;1m�\x1b[39m"
 				wLen = 1
 			}
 			if strLen+wLen+1 > viewMsgsWidth {
 				if strLen != 0 {
-					fmt.Fprintf(v, "%s\n%s",
+					fmt.Fprintf(v, "%s\x1b[49m\n%s",
 						viewMsgWidthSpace[:viewMsgsWidth-strLen],
 						timeLineSpace)
+					//if lineBackgroundGray {
+					//	fmt.Fprint(v, "\x1b[48;5;236m")
+					//}
 					lines += 1
 					strLen = 0
 				}
@@ -1215,9 +1230,12 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 					wRunes = wRunes[end:]
 					fmt.Fprint(v, string(chunk))
 					if len(wRunes) != 0 {
-						fmt.Fprintf(v, "%s\n%s",
+						fmt.Fprintf(v, "%s\x1b[49m\n%s",
 							viewMsgWidthSpace[:viewMsgsWidth-strLen],
 							timeLineSpace)
+						//if lineBackgroundGray {
+						//	fmt.Fprint(v, "\x1b[48;5;236m")
+						//}
 						lines += 1
 					}
 				}
@@ -1231,13 +1249,31 @@ func printMessage(v *gocui.View, e *mor.Event, r *mor.Room) {
 				strLen += wLen
 			}
 		}
-		fmt.Fprintf(v, "%s\n", viewMsgWidthSpace[:viewMsgsWidth-strLen])
+		if l == "" {
+			//if lineBackgroundGray {
+			//	fmt.Fprint(v, "\x1b[48;5;236m")
+			//}
+			fmt.Fprintf(v, "%s", viewMsgWidthSpace)
+		}
+		fmt.Fprintf(v, "%s\n\x1b[49m", viewMsgWidthSpace[:viewMsgsWidth-strLen])
 		lines += 1
 	}
 	if text == "" {
 		fmt.Fprintf(v, "%s\n", viewMsgWidthSpace)
 	}
 	viewMsgsLines += lines
+	//if lineBackgroundGray {
+	//	lineBackgroundGray = false
+	//} else {
+	//	lineBackgroundGray = true
+	//}
+}
+
+func stringSplit(text string, l uint) (ss []string) {
+	for _, newline := range strings.Split(text, "\n") {
+		ss = append(ss, newline)
+	}
+	return
 }
 
 func quit(g *gocui.Gui) error {

@@ -214,8 +214,8 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	c.Rs.ConsoleUserID = ConsoleUserID
 	r, _ := c.AddRoom(c.Rs.consoleRoomID, "Console", "", "")
 	r.HasFirstMsg = true
-	r.Users.Add(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
-	r.Users.Add(c.cfg.UserID, c.cfg.DisplayName, 0, MemJoin)
+	r.Users.AddUpdate(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
+	r.Users.AddUpdate(c.cfg.UserID, c.cfg.DisplayName, 0, MemJoin)
 	c.Rs.ConsoleRoom = c.Rs.ByID(c.Rs.consoleRoomID)
 	if c.Rs.ConsoleRoom != c.Rs.R[0] {
 		panic("ConsoleRoom is not Rs.R[0]")

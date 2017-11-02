@@ -241,61 +241,45 @@ func (u *User) String() string {
 	return u.DispName
 }
 
-// If myUserID != "", update the room display name
-func (u *User) updateDispName(r *Room) {
-	u.rwm.Lock()
-	defer u.rwm.Unlock()
+// r.Users.byNameLen RLocks Users
+func (u *User) updateDispName(r *Room) bool {
 	prevDispName := u.DispName
 	//if myUserID != "" {
 	//	defer r.updateDispName(myUserID)
 	//}
-	defer func() {
-		if u.DispName != prevDispName {
-			r.Rooms.call.UpdateUser(r, u)
-		}
-	}()
 	if u.Name == "" {
 		u.DispName = u.ID
-		return
-	}
-	if r.Users.byNameCount[u.Name] > 1 {
+	} else if r.Users.byNameLen(u.Name) > 1 {
 		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.ID)
-		return
+	} else {
+		u.DispName = u.Name
 	}
-	u.DispName = u.Name
-	return
+	return u.DispName == prevDispName
 }
 
+// r.Users.{delByName,addByName} Locks Users
 func (u *User) setName(name string, r *Room) {
-	u.rwm.Lock()
 	if u.Name == name {
-		u.rwm.Unlock()
 		return
 	} else if u.Name != "" {
-		r.Users.byNameCount[u.Name]--
+		//r.Users.byNameCount[u.Name]--
+		r.Users.delByName(u)
 	}
 	u.Name = name
-	u.rwm.Unlock()
-	u.updateDispName(r)
+	//u.updateDispName(r)
 	if u.Name != "" {
-		r.Users.byNameCount[u.Name]++
+		//r.Users.byNameCount[u.Name]++
+		r.Users.addByName(u)
 	}
 }
 
 func (u *User) setPower(power int, r *Room) {
-	u.rwm.Lock()
-	if u.Power == power {
-		u.rwm.Unlock()
-		return
-	}
 	u.Power = power
-	u.rwm.Unlock()
 }
 
+// r.Users.MemCountDelta Locks Users
 func (u *User) setMembership(mem Membership, newUser bool, r *Room) {
-	u.rwm.Lock()
 	if u.Mem == mem && !newUser {
-		u.rwm.Unlock()
 		return
 	}
 	u.Mem = mem
@@ -304,7 +288,6 @@ func (u *User) setMembership(mem Membership, newUser bool, r *Room) {
 	} else {
 		r.Users.MemCountDelta(u.Mem, mem, -1, 1)
 	}
-	u.rwm.Unlock()
 }
 
 type Users struct {
@@ -312,7 +295,8 @@ type Users struct {
 	// TODO: Concurrent write and/or read is not ok
 	byID map[string]*User
 	// TODO: Concurrent write and/or read is not ok
-	byNameCount map[string]uint
+	//byNameCount map[string]uint
+	byName map[string][]*User
 	// TODO: Add byDispName map[string]*User
 
 	MemCount [MembershipLen]int
@@ -334,52 +318,90 @@ func (us *Users) MemCountDelta(memOld, memNew Membership, deltaOld, deltaNew int
 	us.rwm.Unlock()
 }
 
+func (us *Users) addByName(u *User) {
+	us.rwm.Lock()
+	defer us.rwm.Unlock()
+
+	l := us.byName[u.Name]
+	l = append(l, u)
+	us.byName[u.Name] = l
+}
+
+func (us *Users) delByName(u *User) {
+	us.rwm.Lock()
+	defer us.rwm.Unlock()
+
+	l1 := us.byName[u.Name]
+	l2 := make([]*User, 0, len(l1)-1)
+	for _, u1 := range l1 {
+		if u1.ID != u.ID {
+			l2 = append(l2, u1)
+		}
+	}
+	us.byName[u.Name] = l2
+}
+
+func (us *Users) byNameLen(name string) int {
+	us.rwm.RLock()
+	defer us.rwm.RUnlock()
+	return len(us.byName[name])
+}
+
 func newUsers(r *Room) (us Users) {
 	us.U = make([]*User, 0)
 	us.byID = make(map[string]*User, 0)
-	us.byNameCount = make(map[string]uint, 0)
+	//us.byNameCount = make(map[string]uint, 0)
+	us.byName = make(map[string][]*User, 0)
 	us.Room = r
 	us.rwm = &sync.RWMutex{}
 	return us
 }
 
 // Add or Update the User
-func (us *Users) Add(id, name string, power int, mem Membership) (*User, error) {
-	us.rwm.Lock()
-
+func (us *Users) AddUpdate(id, name string, power int, mem Membership) (*User, error) {
 	updateDispName := false
 	newUser := false
+	us.rwm.RLock()
 	u := us.byID[id]
+	us.rwm.RUnlock()
 	if u == nil {
 		updateDispName = true
 		newUser = true
 		u = &User{ID: id}
-		us.U = append(us.U, u)
-		us.byID[u.ID] = u
-		us.Room.Rooms.call.AddUser(us.Room, u)
 	} else if u.Name != name {
 		updateDispName = true
 	}
-	us.rwm.Unlock()
 
+	u.rwm.Lock()
 	u.setName(name, us.Room)
 	u.setPower(power, us.Room)
 	u.setMembership(mem, newUser, us.Room)
-
-	//return u, fmt.Errorf("User %v already exists in this room", id)
-
-	us.rwm.RLock()
 	if updateDispName {
-		for _, u := range us.U {
-			u.updateDispName(us.Room)
+		u.updateDispName(us.Room)
+	}
+	u.rwm.Unlock()
+
+	if newUser {
+		us.rwm.Lock()
+		us.U = append(us.U, u)
+		us.byID[u.ID] = u
+		us.rwm.Unlock()
+		us.Room.Rooms.call.AddUser(us.Room, u)
+	}
+
+	if updateDispName {
+		us.rwm.RLock()
+		for _, u1 := range us.U {
+			u1.rwm.Lock()
+			if u1.updateDispName(us.Room) {
+				defer us.Room.Rooms.call.UpdateUser(us.Room, u1)
+			}
+			u1.rwm.Unlock()
 		}
+		us.rwm.RUnlock()
+		defer us.Room.updateDispName(*us.Room.myUserID)
 	}
-	us.rwm.RUnlock()
 
-	if updateDispName {
-		us.Room.updateDispName(*us.Room.myUserID)
-	}
-	us.Room.Rooms.call.UpdateUser(us.Room, u)
 	return u, nil
 }
 
@@ -777,7 +799,7 @@ func (r *Room) updateState(ev *gomatrix.Event) error {
 		if ev.StateKey == nil || *ev.StateKey == "" {
 			return fmt.Errorf("m.room.member doesn't have a state key")
 		}
-		r.Users.Add(*ev.StateKey, cnt.Name, 0, cnt.Membership)
+		r.Users.AddUpdate(*ev.StateKey, cnt.Name, 0, cnt.Membership)
 		if cnt.Membership == MemLeave && ev.StateKey == r.myUserID {
 			r.SetMembership(MemLeave)
 		}

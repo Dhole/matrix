@@ -111,43 +111,34 @@ func UpdateShortcuts(rs *mor.Rooms) {
 	rsUI.GroupRooms = make([]*mor.Room, 0)
 	rsUI.InvitedRooms = make([]*mor.Room, 0)
 	rsUI.LeftRooms = make([]*mor.Room, 0)
-	count := 0
-	rsUI.ByShortcut[0] = rs.ConsoleRoom
+
+	// Iterate rs.R only once to enforce a consistent view of all the rooms
+	// (We don't want the same room in two lists).
 	for _, r := range rs.R[1:] {
-		if len(r.Users.U) == 2 && r.Mem == mor.MemJoin {
-			count++
-			rUI := getRoomUI(r)
-			rUI.Shortcut = count
+		if len(r.Users.U) == 2 && r.Mem() == mor.MemJoin {
 			rsUI.PeopleRooms = append(rsUI.PeopleRooms, r)
-			rsUI.ByShortcut[rUI.Shortcut] = r
-		}
-	}
-	for _, r := range rs.R[1:] {
-		if len(r.Users.U) != 2 && r.Mem == mor.MemJoin {
-			count++
-			rUI := getRoomUI(r)
-			rUI.Shortcut = count
+		} else if len(r.Users.U) != 2 && r.Mem() == mor.MemJoin {
 			rsUI.GroupRooms = append(rsUI.GroupRooms, r)
-			rsUI.ByShortcut[rUI.Shortcut] = r
-		}
-	}
-	for _, r := range rs.R[1:] {
-		if r.Mem == mor.MemInvite {
-			count++
-			rUI := getRoomUI(r)
-			rUI.Shortcut = count
+		} else if r.Mem() == mor.MemInvite {
 			rsUI.InvitedRooms = append(rsUI.InvitedRooms, r)
-			rsUI.ByShortcut[rUI.Shortcut] = r
+		} else if r.Mem() == mor.MemLeave {
+			rsUI.LeftRooms = append(rsUI.LeftRooms, r)
 		}
 	}
-	for _, r := range rs.R[1:] {
-		if r.Mem == mor.MemLeave {
-			count++
-			rUI := getRoomUI(r)
-			rUI.Shortcut = count
-			rsUI.LeftRooms = append(rsUI.LeftRooms, r)
-			rsUI.ByShortcut[rUI.Shortcut] = r
-		}
+
+	sortedRooms := make([]*mor.Room, 0, len(rs.R))
+	sortedRooms = append(sortedRooms, rs.ConsoleRoom)
+	sortedRooms = append(sortedRooms, rsUI.PeopleRooms...)
+	sortedRooms = append(sortedRooms, rsUI.GroupRooms...)
+	sortedRooms = append(sortedRooms, rsUI.InvitedRooms...)
+	sortedRooms = append(sortedRooms, rsUI.LeftRooms...)
+
+	count := 0
+	for _, r := range sortedRooms {
+		rUI := getRoomUI(r)
+		rUI.Shortcut = count
+		rsUI.ByShortcut[rUI.Shortcut] = r
+		count++
 	}
 }
 
@@ -359,7 +350,7 @@ func scrollViewMsgs(viewMsgs *gocui.View, l int) error {
 			newY = 0
 			_currentRoom := currentRoom
 			roomUI := getRoomUI(_currentRoom)
-			if _currentRoom.HasFirstMsg || _currentRoom.Mem == mor.MemInvite {
+			if _currentRoom.HasFirstMsg || _currentRoom.Mem() == mor.MemInvite {
 				newY = 1
 			} else if roomUI.TryGettingPrev() {
 				go getPrevEvents(_currentRoom)
@@ -501,7 +492,7 @@ func roomIDCmd(args Args) string {
 	if len(args.Args) == 2 {
 		return args.Args[1]
 	} else if len(args.Args) == 1 {
-		return args.Room.ID
+		return args.Room.ID()
 	} else {
 		return ""
 	}
@@ -580,7 +571,7 @@ func DeletedUser(r *mor.Room, u *mor.User) {
 
 func UpdatedUser(r *mor.Room, u *mor.User) {
 	uUI := getUserUI(u)
-	uUI.DispNameHash = adler32.Checksum([]byte(u.DispName))
+	uUI.DispNameHash = adler32.Checksum([]byte(u.DispName()))
 	if started {
 		if currentRoom == r {
 			rePrintChan <- "users"
@@ -1068,23 +1059,23 @@ func printRoomUsers(v *gocui.View, r *mor.Room) {
 	v.Clear()
 	for _, u := range r.Users.U {
 		power := " "
-		if u.Power > 50 {
+		if u.Power() > 50 {
 			// Colored '@'
 			power = "\x1b[38;5;220m@\x1b[0;0m"
-		} else if u.Power > 0 {
+		} else if u.Power() > 0 {
 			// Colored '+'
 			power = "\x1b[38;5;172m+\x1b[0;0m"
 		}
 		//color := nick256Colors[u.DispNameHash%uint32(len(nick256Colors))]
 		//nick := fmt.Sprintf("\x1b[38;5;%dm%s\x1b[0;0m", color, u.DispName)
 		//fmt.Fprintf(v, "%s%s\n", power, nick)
-		if u.Mem == mor.MemJoin {
+		if u.Mem() == mor.MemJoin {
 			fmt.Fprintf(v, "%s%s\n", power, u)
 		}
 	}
 	printInvite := false
 	for _, u := range r.Users.U {
-		if u.Mem == mor.MemInvite {
+		if u.Mem() == mor.MemInvite {
 			if !printInvite {
 				fmt.Fprintf(v, "\n    Invited\n\n")
 				printInvite = true
@@ -1100,9 +1091,9 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 	u := _currentRoom.Users.ByID(cli.GetUserID())
 	power := "!"
 	if u != nil {
-		if u.Power > 50 {
+		if u.Power() > 50 {
 			power = "@"
-		} else if u.Power > 0 {
+		} else if u.Power() > 0 {
 			power = "+"
 		} else {
 			power = ""
@@ -1112,7 +1103,7 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 		time.Now().Format("15:04"), power, cli.GetDisplayName(),
 		getRoomUI(_currentRoom).Shortcut, _currentRoom, _currentRoom.ID,
 		_currentRoom.Users.MemCount[mor.MemJoin], _currentRoom.Users.MemCount[mor.MemInvite],
-		strings.Replace(_currentRoom.Topic, "\n", " ", -1))
+		strings.Replace(_currentRoom.Topic(), "\n", " ", -1))
 	viewMsgsWidth, _ := v.Size()
 	fmt.Fprintf(v, "%*s", viewMsgsWidth-len(v.Buffer()), "")
 }
@@ -1122,7 +1113,8 @@ func eventToStrings(e *mor.Event, r *mor.Room) (nick, text string) {
 	var color byte
 	var uUI *UserUI
 	if u == nil {
-		u = &mor.User{ID: e.Sender, DispName: e.Sender, UI: &UserUI{DispNameHash: 0}}
+		u = mor.NewUser(e.Sender)
+		u.UI = &UserUI{DispNameHash: 0}
 		uUI = getUserUI(u)
 		color = 244
 	} else {
@@ -1305,7 +1297,7 @@ func keyDebugToggle(g *gocui.Gui, v *gocui.View) error {
 }
 
 func sendText(body string, r *mor.Room) error {
-	go cli.SendText(r.ID, body)
+	go cli.SendText(r.ID(), body)
 	return nil
 }
 

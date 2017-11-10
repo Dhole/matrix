@@ -227,66 +227,100 @@ const (
 )
 
 type User struct {
-	ID       string
-	Name     string
-	DispName string
-	Power    int
-	Mem      Membership
+	id       string
+	name     string
+	dispName string
+	power    int
+	mem      Membership
 
 	rwm sync.RWMutex
 	UI  interface{}
 }
 
+func NewUser(id string) *User {
+	return &User{id: id, dispName: id, power: 0}
+}
+
+func (u *User) ID() string {
+	u.rwm.RLock()
+	defer u.rwm.RUnlock()
+	return u.id
+}
+
+func (u *User) Name() string {
+	u.rwm.RLock()
+	defer u.rwm.RUnlock()
+	return u.name
+}
+
+func (u *User) DispName() string {
+	u.rwm.RLock()
+	defer u.rwm.RUnlock()
+	return u.dispName
+}
+
+func (u *User) Power() int {
+	u.rwm.RLock()
+	defer u.rwm.RUnlock()
+	return u.power
+}
+
+func (u *User) Mem() Membership {
+	u.rwm.RLock()
+	defer u.rwm.RUnlock()
+	return u.mem
+}
+
 func (u *User) String() string {
-	return u.DispName
+	return u.DispName()
 }
 
 // r.Users.byNameLen RLocks Users
 func (u *User) updateDispName(r *Room) bool {
-	prevDispName := u.DispName
+	prevDispName := u.dispName
 	//if myUserID != "" {
 	//	defer r.updateDispName(myUserID)
 	//}
-	if u.Name == "" {
-		u.DispName = u.ID
-	} else if r.Users.byNameLen(u.Name) > 1 {
-		u.DispName = fmt.Sprintf("%s (%s)", u.Name, u.ID)
+	if u.name == "" {
+		u.dispName = u.id
+	} else if r.Users.byNameLen(u.name) > 1 {
+		u.dispName = fmt.Sprintf("%s (%s)", u.name, u.id)
 	} else {
-		u.DispName = u.Name
+		u.dispName = u.name
 	}
-	return u.DispName == prevDispName
+	return u.dispName == prevDispName
 }
 
 // r.Users.{delByName,addByName} Locks Users
 func (u *User) setName(name string, r *Room) {
-	if u.Name == name {
+	if u.name == name {
 		return
-	} else if u.Name != "" {
+	} else if u.name != "" {
 		//r.Users.byNameCount[u.Name]--
 		r.Users.delByName(u)
 	}
-	u.Name = name
+	u.name = name
 	//u.updateDispName(r)
-	if u.Name != "" {
+	if u.name != "" {
 		//r.Users.byNameCount[u.Name]++
 		r.Users.addByName(u)
 	}
 }
 
 func (u *User) setPower(power int, r *Room) {
-	u.Power = power
+	u.power = power
 }
 
 // r.Users.MemCountDelta Locks Users
 func (u *User) setMembership(mem Membership, newUser bool, r *Room) {
-	if u.Mem == mem && !newUser {
+	if u.mem == mem && !newUser {
 		return
 	}
-	u.Mem = mem
+	u.mem = mem
 	if newUser {
-		r.Users.MemCountDelta(u.Mem, mem, 0, 1)
+		r.Users.MemCountDelta(u.mem, mem, 0, 1)
 	} else {
-		r.Users.MemCountDelta(u.Mem, mem, -1, 1)
+		r.Users.MemCountDelta(u.mem, mem, -1, 1)
 	}
 }
 
@@ -322,23 +356,23 @@ func (us *Users) addByName(u *User) {
 	us.rwm.Lock()
 	defer us.rwm.Unlock()
 
-	l := us.byName[u.Name]
+	l := us.byName[u.name]
 	l = append(l, u)
-	us.byName[u.Name] = l
+	us.byName[u.name] = l
 }
 
 func (us *Users) delByName(u *User) {
 	us.rwm.Lock()
 	defer us.rwm.Unlock()
 
-	l1 := us.byName[u.Name]
+	l1 := us.byName[u.name]
 	l2 := make([]*User, 0, len(l1)-1)
 	for _, u1 := range l1 {
-		if u1.ID != u.ID {
+		if u1.id != u.id {
 			l2 = append(l2, u1)
 		}
 	}
-	us.byName[u.Name] = l2
+	us.byName[u.name] = l2
 }
 
 func (us *Users) byNameLen(name string) int {
@@ -367,8 +401,8 @@ func (us *Users) AddUpdate(id, name string, power int, mem Membership) (*User, e
 	if u == nil {
 		updateDispName = true
 		newUser = true
-		u = &User{ID: id}
-	} else if u.Name != name {
+		u = &User{id: id}
+	} else if u.name != name {
 		updateDispName = true
 	}
 
@@ -384,7 +418,7 @@ func (us *Users) AddUpdate(id, name string, power int, mem Membership) (*User, e
 	if newUser {
 		us.rwm.Lock()
 		us.U = append(us.U, u)
-		us.byID[u.ID] = u
+		us.byID[u.id] = u
 		us.rwm.Unlock()
 		us.Room.Rooms.call.AddUser(us.Room, u)
 	}
@@ -487,11 +521,11 @@ func (eb *ExpBackoff) Reset() {
 }
 
 type Room struct {
-	ID         string
-	Name       string
-	DispName   string
-	CanonAlias string
-	Topic      string
+	id         string
+	name       string
+	dispName   string
+	canonAlias string
+	topic      string
 	Users      Users
 	//Msgs        *list.List
 	Events Events
@@ -500,7 +534,7 @@ type Room struct {
 	HasFirstMsg bool
 	HasLastMsg  bool
 	myUserID    *string
-	Mem         Membership
+	mem         Membership
 
 	Rooms      *Rooms
 	rwm        sync.RWMutex
@@ -510,11 +544,11 @@ type Room struct {
 
 func NewRoom(rs *Rooms, id string, mem Membership, name, canonAlias, topic string) (r *Room) {
 	r = &Room{}
-	r.ID = id
-	r.Mem = mem
-	r.Name = name
-	r.CanonAlias = canonAlias
-	r.Topic = topic
+	r.id = id
+	r.mem = mem
+	r.name = name
+	r.canonAlias = canonAlias
+	r.topic = topic
 	r.Users = newUsers(r)
 	r.Events = NewEvents()
 	r.Rooms = rs
@@ -526,50 +560,86 @@ func NewRoom(rs *Rooms, id string, mem Membership, name, canonAlias, topic strin
 //	return r.msgsLen
 //}
 
+func (r *Room) ID() string {
+	r.rwm.RLock()
+	defer r.rwm.RUnlock()
+	return r.id
+}
+
+func (r *Room) Name() string {
+	r.rwm.RLock()
+	defer r.rwm.RUnlock()
+	return r.name
+}
+
+func (r *Room) DispName() string {
+	r.rwm.RLock()
+	defer r.rwm.RUnlock()
+	return r.dispName
+}
+
+func (r *Room) CanonAlias() string {
+	r.rwm.RLock()
+	defer r.rwm.RUnlock()
+	return r.canonAlias
+}
+
+func (r *Room) Topic() string {
+	r.rwm.RLock()
+	defer r.rwm.RUnlock()
+	return r.topic
+}
+
+func (r *Room) Mem() Membership {
+	r.rwm.RLock()
+	defer r.rwm.RUnlock()
+	return r.mem
+}
+
 func (r *Room) String() string {
-	return r.DispName
+	return r.DispName()
 }
 
 func (r *Room) updateDispName(myUserID string) {
 	r.rwm.Lock()
 	defer r.rwm.Unlock()
-	prevDispName := r.DispName
+	prevDispName := r.dispName
 	defer func() {
-		if r.DispName != prevDispName {
+		if r.dispName != prevDispName {
 			r.Rooms.call.UpdateRoom(r, RoomStateDispName)
 		}
 	}()
-	if r.Name != "" {
-		r.DispName = r.Name
+	if r.name != "" {
+		r.dispName = r.name
 		return
 	}
-	if r.CanonAlias != "" {
-		r.DispName = r.CanonAlias
+	if r.canonAlias != "" {
+		r.dispName = r.canonAlias
 		return
 	}
 	roomUserIDs := make([]string, 0)
 	for _, u := range r.Users.U {
-		if u.ID == myUserID {
+		if u.id == myUserID {
 			continue
 		}
-		roomUserIDs = append(roomUserIDs, u.ID)
+		roomUserIDs = append(roomUserIDs, u.id)
 	}
 	sort.Strings(roomUserIDs)
 	if len(roomUserIDs) == 1 {
-		r.DispName = r.Users.ByID(roomUserIDs[0]).String()
+		r.dispName = r.Users.ByID(roomUserIDs[0]).String()
 		return
 	}
 	if len(roomUserIDs) == 2 {
-		r.DispName = fmt.Sprintf("%s and %s", r.Users.ByID(roomUserIDs[0]),
+		r.dispName = fmt.Sprintf("%s and %s", r.Users.ByID(roomUserIDs[0]),
 			r.Users.ByID(roomUserIDs[1]))
 		return
 	}
 	if len(roomUserIDs) > 2 {
-		r.DispName = fmt.Sprintf("%s and %d others", r.Users.ByID(roomUserIDs[0]),
+		r.dispName = fmt.Sprintf("%s and %d others", r.Users.ByID(roomUserIDs[0]),
 			len(roomUserIDs)-1)
 		return
 	}
-	r.DispName = "Emtpy room"
+	r.dispName = "Emtpy room"
 }
 
 func parseMessage(msgType string, content map[string]interface{}) (interface{}, error) {
@@ -691,28 +761,28 @@ func parseEvent(evType string, stateKey *string,
 
 func (r *Room) SetName(name string) {
 	r.rwm.Lock()
-	r.Name = name
+	r.name = name
 	r.rwm.Unlock()
 	r.updateDispName(*r.myUserID)
 }
 
 func (r *Room) SetCanonAlias(alias string) {
 	r.rwm.Lock()
-	r.CanonAlias = alias
+	r.canonAlias = alias
 	r.rwm.Unlock()
 	r.updateDispName(*r.myUserID)
 }
 
 func (r *Room) SetTopic(topic string) {
 	r.rwm.Lock()
-	r.Topic = topic
+	r.topic = topic
 	r.rwm.Unlock()
 	r.Rooms.call.UpdateRoom(r, RoomStateTopic)
 }
 
 func (r *Room) SetMembership(mem Membership) {
 	r.rwm.Lock()
-	r.Mem = mem
+	r.mem = mem
 	r.rwm.Unlock()
 	r.Rooms.call.UpdateRoom(r, RoomStateMembership)
 }
@@ -872,9 +942,9 @@ func (rs *Rooms) Add(myUserID *string, roomID string, mem Membership) (*Room, er
 	r = NewRoom(rs, roomID, mem, "", "", "")
 	r.myUserID = myUserID
 	rs.R = append(rs.R, r)
-	rs.byID[r.ID] = r
-	if r.Name != "" {
-		rs.byName[r.Name] = append(rs.byName[r.Name], r)
+	rs.byID[r.id] = r
+	if r.name != "" {
+		rs.byName[r.name] = append(rs.byName[r.name], r)
 	}
 	rs.rwm.Unlock()
 
@@ -891,9 +961,9 @@ func (rs *Rooms) Del(roomID string) (*Room, error) {
 		rs.rwm.Unlock()
 		return nil, fmt.Errorf("Room %v doesn't exists", roomID)
 	}
-	delete(rs.byID, r.ID)
-	if r.Name != "" {
-		delete(rs.byName, r.Name)
+	delete(rs.byID, r.id)
+	if r.name != "" {
+		delete(rs.byName, r.name)
 	}
 	newR := make([]*Room, 0, len(rs.R)-1)
 	for _, room := range rs.R {

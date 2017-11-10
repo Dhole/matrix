@@ -73,7 +73,7 @@ func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 	}
 	start := string(token)
 	end := ""
-	resMessages, err := c.cli.Messages(r.ID, start, end, 'b', int(num))
+	resMessages, err := c.cli.Messages(r.ID(), start, end, 'b', int(num))
 	if err != nil {
 		r.ExpBackoff.Inc()
 		return 0, err

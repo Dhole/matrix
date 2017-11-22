@@ -101,7 +101,7 @@ func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 //	canonicalAlias := res.StringKey("alias")
 //	c.ConsolePrintf("Adding room (%s) %s \"%s\": %s",
 //		roomID, canonicalAlias, name, topic)
-//	r, _ := c.AddRoom(roomID, name, canonicalAlias, topic)
+//	r := c.AddRoom(roomID, name, canonicalAlias, topic)
 //	resJoinedMem, err := c.cli.JoinedMembers(roomID)
 //	if err != nil {
 //		panic(err)
@@ -112,7 +112,7 @@ func (c *Client) GetPrevEvents(r *Room, num uint) (uint, error) {
 //		if userData.DisplayName != nil {
 //			username = *userData.DisplayName
 //		}
-//		r.Users.Add(userID, username, 0, MemJoin)
+//		r.Users.AddUpdate(userID, username, 0, MemJoin)
 //	}
 //	//fmt.Println(roomID, "Batch add complete")
 //	//r.Users.AddBatchFinish()
@@ -127,12 +127,12 @@ func (c *Client) GetDisplayName() string {
 	return c.cfg.DisplayName
 }
 
-func (c *Client) AddRoom(roomID, name, canonAlias, topic string) (*Room, error) {
-	r, err := c.Rs.Add(&c.cfg.UserID, roomID, MemJoin)
+func (c *Client) AddRoom(roomID, name, canonAlias, topic string) *Room {
+	r := c.Rs.AddUpdate(&c.cfg.UserID, roomID, MemJoin)
 	r.SetName(name)
 	r.SetCanonAlias(canonAlias)
 	r.SetTopic(topic)
-	return r, err
+	return r
 }
 
 func (c *Client) ConsolePrintf(txtType MsgTxtType, format string, args ...interface{}) {
@@ -209,15 +209,13 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 	c.cli = cli
 
 	c.Rs = NewRooms(call)
-	c.Rs.consoleRoomID = ConsoleRoomID
-	c.Rs.ConsoleDisplayName = ConsoleDisplayName
-	c.Rs.ConsoleUserID = ConsoleUserID
-	r, _ := c.AddRoom(c.Rs.consoleRoomID, "Console", "", "")
+	c.Rs.consoleUserID = ConsoleUserID
+	r := c.AddRoom(ConsoleRoomID, "Console", "", "")
 	r.HasFirstMsg = true
-	r.Users.AddUpdate(c.Rs.ConsoleUserID, c.Rs.ConsoleDisplayName, 100, MemJoin)
+	r.Users.AddUpdate(c.Rs.consoleUserID, ConsoleUserDisplayName, 100, MemJoin)
 	r.Users.AddUpdate(c.cfg.UserID, c.cfg.DisplayName, 0, MemJoin)
-	c.Rs.ConsoleRoom = c.Rs.ByID(c.Rs.consoleRoomID)
-	if c.Rs.ConsoleRoom != c.Rs.R[0] {
+	c.Rs.SetConsoleRoom(r)
+	if c.Rs.ConsoleRoom() != c.Rs.R[0] {
 		panic("ConsoleRoom is not Rs.R[0]")
 	}
 
@@ -226,8 +224,8 @@ func NewClient(configName string, configPaths []string, call Callbacks) (*Client
 
 // TODO: Handle error, maybe hold message if unsuccesful
 func (c *Client) SendText(roomID, body string) {
-	if roomID == c.Rs.consoleRoomID || body[0] == '/' {
-		c.Rs.ConsoleRoom.PushTextMessage(MsgTxtTypeText, txnID(),
+	if roomID == c.Rs.ConsoleRoom().ID() || body[0] == '/' {
+		c.Rs.ConsoleRoom().PushTextMessage(MsgTxtTypeText, txnID(),
 			time.Now().Unix()*1000, c.cfg.UserID, body)
 		body = strings.TrimPrefix(body, "/")
 		args := strings.Fields(body)
@@ -359,7 +357,7 @@ func (c *Client) Sync() error {
 
 func (c *Client) update(res *gomatrix.RespSync) {
 	for roomID, roomData := range res.Rooms.Join {
-		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemJoin)
+		r := c.Rs.AddUpdate(&c.cfg.UserID, roomID, MemJoin)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 			//if err != nil && roomID == "!JpNcLQuoaOfdycmQio:matrix.org" {
@@ -377,7 +375,7 @@ func (c *Client) update(res *gomatrix.RespSync) {
 		//}
 	}
 	for roomID, roomData := range res.Rooms.Invite {
-		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemInvite)
+		r := c.Rs.AddUpdate(&c.cfg.UserID, roomID, MemInvite)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}
@@ -386,7 +384,7 @@ func (c *Client) update(res *gomatrix.RespSync) {
 		//}
 	}
 	for roomID, roomData := range res.Rooms.Leave {
-		r, _ := c.Rs.Add(&c.cfg.UserID, roomID, MemLeave)
+		r := c.Rs.AddUpdate(&c.cfg.UserID, roomID, MemLeave)
 		for _, ev := range roomData.State.Events {
 			r.updateState(&ev)
 		}

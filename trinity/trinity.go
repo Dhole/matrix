@@ -4,7 +4,11 @@ import (
 	mor "../morpheus"
 	"bytes"
 	"fmt"
+	"os"
+	"os/signal"
+	"runtime"
 	"sync"
+	"syscall"
 	//"github.com/jroimartin/gocui"
 	"../../gocui"
 	"hash/adler32"
@@ -106,7 +110,7 @@ func getRoomsUI(rs *mor.Rooms) *RoomsUI {
 
 func UpdateShortcuts(rs *mor.Rooms) {
 	rsUI := getRoomsUI(rs)
-	rsUI.ByShortcut = make(map[int]*mor.Room)
+	rsUI.ByShortcut = make(map[int]*mor.Room, len(rs.R))
 	rsUI.PeopleRooms = make([]*mor.Room, 0)
 	rsUI.GroupRooms = make([]*mor.Room, 0)
 	rsUI.InvitedRooms = make([]*mor.Room, 0)
@@ -127,7 +131,7 @@ func UpdateShortcuts(rs *mor.Rooms) {
 	}
 
 	sortedRooms := make([]*mor.Room, 0, len(rs.R))
-	sortedRooms = append(sortedRooms, rs.ConsoleRoom)
+	sortedRooms = append(sortedRooms, rs.ConsoleRoom())
 	sortedRooms = append(sortedRooms, rsUI.PeopleRooms...)
 	sortedRooms = append(sortedRooms, rsUI.GroupRooms...)
 	sortedRooms = append(sortedRooms, rsUI.InvitedRooms...)
@@ -244,6 +248,7 @@ func shortcuts(key gocui.Key, ch rune, mod gocui.Modifier) bool {
 	}
 	if roomShortcut != -1 {
 		rsUI := getRoomsUI(&rs)
+		cli.DebugPrint(rsUI.ByShortcut)
 		r, ok := rsUI.ByShortcut[roomShortcut]
 		if ok {
 			setCurrentRoom(r, true)
@@ -600,7 +605,7 @@ func DeletedRoom(r *mor.Room) {
 			if lastRoom != r {
 				currentRoom = lastRoom
 			} else {
-				currentRoom = cli.Rs.ConsoleRoom
+				currentRoom = cli.Rs.ConsoleRoom()
 			}
 			rePrintChan <- "all"
 		} else {
@@ -675,7 +680,7 @@ func main() {
 	//
 	// Init
 	initRoomsUI(&cli.Rs)
-	currentRoom = cli.Rs.ConsoleRoom
+	currentRoom = cli.Rs.ConsoleRoom()
 	lastRoom = currentRoom
 
 	//
@@ -754,6 +759,20 @@ func main() {
 		}); err != nil {
 		log.Panicln(err)
 	}
+
+	// When reciving a SIGQUIT, terminate gocui nicely and dump a stack trace
+	go func() {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGQUIT)
+		buf := make([]byte, 1<<20)
+		for {
+			<-sigs
+			g.Close()
+			stacklen := runtime.Stack(buf, true)
+			log.Printf("=== received SIGQUIT ===\n*** goroutine dump...\n%s\n*** end\n", buf[:stacklen])
+		}
+	}()
+
 	// TODO
 	// F11 / F12: scroll nicklist
 	// F9 / F10: scroll roomlist
@@ -812,6 +831,7 @@ func strTrimPadRight(s string, pLen int) string {
 		return runewidth.FillRight(s, pLen)
 	}
 }
+
 func setCurrentRoom(r *mor.Room, toggle bool) {
 	if toggle {
 		if currentRoom == r {
@@ -943,7 +963,7 @@ func printRooms(v *gocui.View) {
 		pad = 2
 	}
 	rsUI := getRoomsUI(rs)
-	roomSets := [][]*mor.Room{[]*mor.Room{rs.ConsoleRoom},
+	roomSets := [][]*mor.Room{[]*mor.Room{rs.ConsoleRoom()},
 		rsUI.PeopleRooms, rsUI.GroupRooms, rsUI.InvitedRooms, rsUI.LeftRooms}
 	for i, roomSet := range roomSets {
 		if len(roomSet) != 0 {
@@ -1101,7 +1121,7 @@ func printStatusLine(v *gocui.View, r *mor.Room) {
 	}
 	fmt.Fprintf(v, "\x1b[48;5;57m[%s] [%s%s] %d.%v (%s) [joined:%d, invited:%d] %s",
 		time.Now().Format("15:04"), power, cli.GetDisplayName(),
-		getRoomUI(_currentRoom).Shortcut, _currentRoom, _currentRoom.ID,
+		getRoomUI(_currentRoom).Shortcut, _currentRoom, _currentRoom.ID(),
 		_currentRoom.Users.MemCount[mor.MemJoin], _currentRoom.Users.MemCount[mor.MemInvite],
 		strings.Replace(_currentRoom.Topic(), "\n", " ", -1))
 	viewMsgsWidth, _ := v.Size()

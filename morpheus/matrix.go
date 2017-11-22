@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	ConsoleUserID      string = "@morpheus:localhost"
-	ConsoleDisplayName string = "morpheus"
-	ConsoleRoomID      string = "!console:localhost"
+	ConsoleUserID          string = "@morpheus:localhost"
+	ConsoleUserDisplayName string = "morpheus"
+	ConsoleRoomID          string = "!console:localhost"
 )
 
 type Token string
@@ -276,6 +276,7 @@ func (u *User) String() string {
 }
 
 // r.Users.byNameLen RLocks Users
+// Returns true if the User.dispName was updated
 func (u *User) updateDispName(r *Room) bool {
 	prevDispName := u.dispName
 	//if myUserID != "" {
@@ -325,10 +326,8 @@ func (u *User) setMembership(mem Membership, newUser bool, r *Room) {
 }
 
 type Users struct {
-	U []*User
-	// TODO: Concurrent write and/or read is not ok
+	U    []*User
 	byID map[string]*User
-	// TODO: Concurrent write and/or read is not ok
 	//byNameCount map[string]uint
 	byName map[string][]*User
 	// TODO: Add byDispName map[string]*User
@@ -337,6 +336,16 @@ type Users struct {
 
 	Room *Room
 	rwm  *sync.RWMutex
+}
+
+func newUsers(r *Room) (us Users) {
+	us.U = make([]*User, 0)
+	us.byID = make(map[string]*User)
+	//us.byNameCount = make(map[string]uint, 0)
+	us.byName = make(map[string][]*User)
+	us.Room = r
+	us.rwm = &sync.RWMutex{}
+	return us
 }
 
 func (us *Users) ByID(id string) *User {
@@ -381,23 +390,11 @@ func (us *Users) byNameLen(name string) int {
 	return len(us.byName[name])
 }
 
-func newUsers(r *Room) (us Users) {
-	us.U = make([]*User, 0)
-	us.byID = make(map[string]*User, 0)
-	//us.byNameCount = make(map[string]uint, 0)
-	us.byName = make(map[string][]*User, 0)
-	us.Room = r
-	us.rwm = &sync.RWMutex{}
-	return us
-}
-
 // Add or Update the User
 func (us *Users) AddUpdate(id, name string, power int, mem Membership) (*User, error) {
 	updateDispName := false
 	newUser := false
-	us.rwm.RLock()
-	u := us.byID[id]
-	us.rwm.RUnlock()
+	u := us.ByID(id)
 	if u == nil {
 		updateDispName = true
 		newUser = true
@@ -425,10 +422,11 @@ func (us *Users) AddUpdate(id, name string, power int, mem Membership) (*User, e
 
 	if updateDispName {
 		us.rwm.RLock()
+		// TODO: Improvement: only trigger the updateDispName to users in us.byName[oldname] and us.byName[newname]
 		for _, u1 := range us.U {
 			u1.rwm.Lock()
 			if u1.updateDispName(us.Room) {
-				defer us.Room.Rooms.call.UpdateUser(us.Room, u1)
+				defer func() { go us.Room.Rooms.call.UpdateUser(us.Room, u1) }()
 			}
 			u1.rwm.Unlock()
 		}
@@ -480,7 +478,7 @@ func (us *Users) Del(u *User) {
 	// TODO
 	// TODO: What if there are two users with the same name?
 	us.rwm.Unlock()
-	us.Room.Rooms.call.DelUser(us.Room, u)
+	go us.Room.Rooms.call.DelUser(us.Room, u)
 }
 
 func (us *Users) SetUserName(u *User, name string) {
@@ -488,7 +486,7 @@ func (us *Users) SetUserName(u *User, name string) {
 	// TODO
 	// TODO: What if there are two users with the same name?
 	us.rwm.Unlock()
-	us.Room.Rooms.call.UpdateUser(us.Room, u)
+	go us.Room.Rooms.call.UpdateUser(us.Room, u)
 }
 
 type ExpBackoff struct {
@@ -606,7 +604,7 @@ func (r *Room) updateDispName(myUserID string) {
 	prevDispName := r.dispName
 	defer func() {
 		if r.dispName != prevDispName {
-			r.Rooms.call.UpdateRoom(r, RoomStateDispName)
+			go r.Rooms.call.UpdateRoom(r, RoomStateDispName)
 		}
 	}()
 	if r.name != "" {
@@ -777,14 +775,14 @@ func (r *Room) SetTopic(topic string) {
 	r.rwm.Lock()
 	r.topic = topic
 	r.rwm.Unlock()
-	r.Rooms.call.UpdateRoom(r, RoomStateTopic)
+	go r.Rooms.call.UpdateRoom(r, RoomStateTopic)
 }
 
 func (r *Room) SetMembership(mem Membership) {
 	r.rwm.Lock()
 	r.mem = mem
 	r.rwm.Unlock()
-	r.Rooms.call.UpdateRoom(r, RoomStateMembership)
+	go r.Rooms.call.UpdateRoom(r, RoomStateMembership)
 }
 
 func (r *Room) PushToken(token string) {
@@ -807,7 +805,7 @@ func (r *Room) PushMessage(msgType, id string, ts int64, userID string,
 	e := &Event{"m.room.message", id, ts, userID, nil, Message{msgType, cnt}}
 	r.Events.PushBackEvent(e)
 	//r.msgsLen++
-	r.Rooms.call.ArrvMessage(r, e)
+	go r.Rooms.call.ArrvMessage(r, e)
 	return nil
 }
 
@@ -816,7 +814,7 @@ func (r *Room) PushTextMessage(txtType MsgTxtType, id string, ts int64, userID, 
 		Message{"m.text", TextMessage{body, txtType}}}
 	r.Events.PushBackEvent(e)
 	//r.msgsLen++
-	r.Rooms.call.ArrvMessage(r, e)
+	go r.Rooms.call.ArrvMessage(r, e)
 	return nil
 }
 
@@ -828,7 +826,7 @@ func (r *Room) PushEvent(ev *gomatrix.Event) error {
 	e := &Event{ev.Type, ev.ID, int64(ev.Timestamp), ev.Sender, ev.StateKey, cnt}
 	r.Events.PushBackEvent(e)
 	//r.msgsLen++
-	r.Rooms.call.ArrvMessage(r, e)
+	go r.Rooms.call.ArrvMessage(r, e)
 	return nil
 }
 
@@ -869,6 +867,7 @@ func (r *Room) updateState(ev *gomatrix.Event) error {
 		if ev.StateKey == nil || *ev.StateKey == "" {
 			return fmt.Errorf("m.room.member doesn't have a state key")
 		}
+		// FIXME: Don't reset user's power to 0
 		r.Users.AddUpdate(*ev.StateKey, cnt.Name, 0, cnt.Membership)
 		if cnt.Membership == MemLeave && ev.StateKey == r.myUserID {
 			r.SetMembership(MemLeave)
@@ -894,19 +893,30 @@ type Callbacks struct {
 }
 
 type Rooms struct {
-	R []*Room
-	// TODO: Concurrent write and/or read is not ok
+	R    []*Room
 	byID map[string]*Room
-	// TODO: Concurrent write and/or read is not ok
-	byName             map[string][]*Room
-	ConsoleRoom        *Room
-	consoleRoomID      string
-	ConsoleDisplayName string
-	ConsoleUserID      string
+	// TODO: Implement setting and updating byName
+	byName      map[string][]*Room
+	consoleRoom *Room
+	//consoleRoomID      string
+	//ConsoleUserDisplayName string
+	consoleUserID string
 
 	rwm  *sync.RWMutex
 	call Callbacks
 	UI   interface{}
+}
+
+func (rs *Rooms) ConsoleRoom() *Room {
+	rs.rwm.RLock()
+	defer rs.rwm.RUnlock()
+	return rs.consoleRoom
+}
+
+func (rs *Rooms) SetConsoleRoom(r *Room) {
+	rs.rwm.Lock()
+	defer rs.rwm.Unlock()
+	rs.consoleRoom = r
 }
 
 func (rs *Rooms) ByID(id string) *Room {
@@ -923,35 +933,41 @@ func (rs *Rooms) ByName(name string) []*Room {
 
 func NewRooms(call Callbacks) (rs Rooms) {
 	rs.R = make([]*Room, 0)
-	rs.byID = make(map[string]*Room, 0)
-	rs.byName = make(map[string][]*Room, 0)
+	rs.byID = make(map[string]*Room)
+	rs.byName = make(map[string][]*Room)
 	rs.rwm = &sync.RWMutex{}
 	rs.call = call
 	return rs
 }
 
 // Add or Update the Room
-func (rs *Rooms) Add(myUserID *string, roomID string, mem Membership) (*Room, error) {
+func (rs *Rooms) AddUpdate(myUserID *string, roomID string, mem Membership) *Room {
 	rs.rwm.Lock()
 	r, ok := rs.byID[roomID]
 	if ok {
 		r.SetMembership(mem)
 		rs.rwm.Unlock()
-		return r, fmt.Errorf("Room %v already exists", roomID)
+		//return r, fmt.Errorf("Room %v already exists", roomID)
+		return r
 	}
 	r = NewRoom(rs, roomID, mem, "", "", "")
 	r.myUserID = myUserID
 	rs.R = append(rs.R, r)
 	rs.byID[r.id] = r
-	if r.name != "" {
-		rs.byName[r.name] = append(rs.byName[r.name], r)
-	}
+	// We are not updating the room name here!
+	//if r.name != "" {
+	//	rs.byName[r.name] = append(rs.byName[r.name], r)
+	//}
 	rs.rwm.Unlock()
 
 	rs.call.AddRoom(r)
+	// FIXME: updateDispName will call rs.call.UpdateRoom because the
+	// displayname will be updated, but we also call rs.call.UpdateRoom
+	// here unconditionally, so we end up calling rs.call.UpdateRoom twice
 	r.updateDispName(*r.myUserID)
-	rs.call.UpdateRoom(r, RoomStateAll)
-	return r, nil
+	go rs.call.UpdateRoom(r, RoomStateAll)
+	//return r, nil
+	return r
 }
 
 func (rs *Rooms) Del(roomID string) (*Room, error) {
@@ -974,7 +990,7 @@ func (rs *Rooms) Del(roomID string) (*Room, error) {
 	}
 	rs.R = newR
 	rs.rwm.Unlock()
-	rs.call.DelRoom(r)
+	go rs.call.DelRoom(r)
 	return r, nil
 }
 
@@ -983,15 +999,15 @@ func (rs *Rooms) SetRoomName(r *Room, name string) {
 	// TODO
 	// TODO: What if there are two rooms with the same name?
 	rs.rwm.Unlock()
-	rs.call.UpdateRoom(r, RoomStateName)
+	go rs.call.UpdateRoom(r, RoomStateName)
 }
 
 func (rs *Rooms) AddConsoleMessage(msgType string, content map[string]interface{}) error {
-	return rs.ConsoleRoom.PushMessage(msgType, txnID(), time.Now().Unix()*1000,
-		rs.ConsoleUserID, content)
+	return rs.ConsoleRoom().PushMessage(msgType, txnID(), time.Now().Unix()*1000,
+		rs.consoleUserID, content)
 }
 
 func (rs *Rooms) AddConsoleTextMessage(txtType MsgTxtType, body string) error {
-	return rs.ConsoleRoom.PushTextMessage(txtType, txnID(), time.Now().Unix()*1000,
-		rs.ConsoleUserID, body)
+	return rs.ConsoleRoom().PushTextMessage(txtType, txnID(), time.Now().Unix()*1000,
+		rs.consoleUserID, body)
 }

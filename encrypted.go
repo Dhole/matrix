@@ -20,20 +20,20 @@ var deviceID = "5un3HpnWE"
 var deviceDisplayName = "go-olm-dev"
 
 type Device struct {
-	ID               string
-	SigningKey       string                              // Ed25519
-	IdentityKey      string                              // OlmCurve25519
-	OneTimeKey       string                              // OlmCurve25519
+	ID          string
+	SigningKey  string // Ed25519
+	IdentityKey string // OlmCurve25519
+	//OneTimeKey       string                              // OlmCurve25519
 	OlmSessions      map[string]*olm.Session             // key:session_id
 	MegolmInSessions map[string]*olm.InboundGroupSession // key:session_id
 }
 
 type MyDevice struct {
-	ID                string
-	SigningKey        string // Ed25519
-	IdentityKey       string // OlmCurve25519
-	OlmAccount        *olm.Account
-	OlmSessions       map[string]*olm.Session              // key:room_id
+	ID          string
+	SigningKey  string // Ed25519
+	IdentityKey string // OlmCurve25519
+	OlmAccount  *olm.Account
+	//OlmSessions       map[string]*olm.Session              // key:room_id
 	MegolmOutSessions map[string]*olm.OutboundGroupSession // key:room_id
 
 }
@@ -43,68 +43,228 @@ type User struct {
 	Devices map[string]*Device
 }
 
+type MyUser struct {
+	ID     string
+	Device *MyDevice
+}
+
 type SignedKey struct {
 	Key        string                       `json:"key"`
 	Signatures map[string]map[string]string `json:"signatures"`
 }
 
-func SplitAlgorithmKeyID(algorithmKeyID string) (string, string) {
-	algorithmKeyIDSlice := strings.Split(algorithmKeyID, ":")
-	if len(algorithmKeyIDSlice) != 2 {
-		return "", ""
-	}
-	return algorithmKeyIDSlice[0], algorithmKeyIDSlice[1]
+type CryptoDB struct {
+	db *bolt.DB
 }
 
-func main() {
-	db, err := bolt.Open("test.db", 0600, &bolt.Options{Timeout: 200 * time.Millisecond})
+// OpenCryptoDB opens the DB and initializes the /crypto bucket if necessary
+func OpenCryptoDB(filename string) (CryptoDB, error) {
+	var cdb CryptoDB
+	db, err := bolt.Open(filename, 0660, &bolt.Options{Timeout: 200 * time.Millisecond})
+	cdb.db = db
 	if err != nil {
-		log.Fatal(err)
+		return cdb, err
 	}
-	defer db.Close()
-
-	// Create base buckets, create my user and device buckets, check for existence of an olm account
-	userCryptoExists := false
-	db.Update(func(tx *bolt.Tx) error {
+	// Create base buckets
+	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		cryptoBucket, err := tx.CreateBucketIfNotExists([]byte("crypto"))
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)
 		}
+		return nil
+	})
+	return cdb, err
+}
+
+// Close closes the DB
+func (cdb *CryptoDB) Close() {
+	cdb.db.Close()
+}
+
+// ExistsUserDevice checks if /crypto/<userID>/<deviceID>/ exists
+func (cdb *CryptoDB) ExistsUserDevice(userID, deviceID string) bool {
+	deviceExists := false
+	cdb.db.Update(func(tx *bolt.Tx) error {
+		cryptoBucket := tx.Bucket([]byte("crypto"))
+		userBucket := cryptoBucket.Bucket([]byte(userID))
+		if userBucket != nil {
+			return nil
+		}
+		deviceBucket := userBucket.Bucket([]byte(deviceID))
+		if deviceBucket != nil {
+			return nil
+		}
+		deviceExists = true
+		return nil
+	})
+	return deviceExists
+}
+
+// AddMyUserMyDevice adds /crypto/<userID>/<deviceID>/megolm_out/ buckets
+func (cdb *CryptoDB) AddMyUserMyDevice(userID, deviceID string) error {
+	err := cdb.db.Update(func(tx *bolt.Tx) error {
+		cryptoBucket := tx.Bucket([]byte("crypto"))
 		userBucket, err := cryptoBucket.CreateBucketIfNotExists([]byte(userID))
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)
 		}
-		deviceBucket, err := userBucket.CreateBucketIfNotExists([]byte(deviceID))
+		_, err := userBucket.CreateBucketIfNotExists([]byte(deviceID))
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)
 		}
-		v := deviceBucket.Get([]byte("ed25519"))
-		if v != nil {
-			userCryptoExists = true
+		_, err := userBucket.CreateBucketIfNotExists([]byte("megolm_out"))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
 		}
 		return nil
 	})
+	return err
+}
 
-	// Create a new olm account if it doesn't exists and store it in the DB
-	if !userCryptoExists {
-		olmAccount := olm.NewAccount()
-		identityKeysJSON := olmAccount.IdentityKeys()
-		identityKeys := map[string]string{}
-		err = json.Unmarshal([]byte(identityKeysJSON), &identityKeys)
+// AddUserDevice adds /crypto/<userID>/<deviceID>/{olm,megolm_in}/ buckets
+func (cdb *CryptoDB) AddUserDevice(userID, deviceID string) error {
+	err := cdb.db.Update(func(tx *bolt.Tx) error {
+		cryptoBucket := tx.Bucket([]byte("crypto"))
+		userBucket, err := cryptoBucket.CreateBucketIfNotExists([]byte(userID))
 		if err != nil {
-			panic(err)
+			return fmt.Errorf("create bucket: %s", err)
 		}
+		_, err := userBucket.CreateBucketIfNotExists([]byte(deviceID))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+		_, err := userBucket.CreateBucketIfNotExists([]byte("olm"))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+		_, err := userBucket.CreateBucketIfNotExists([]byte("megolm_in"))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+		return nil
+	})
+	return err
+}
 
-		db.Update(func(tx *bolt.Tx) error {
-			deviceBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID)).Bucket([]byte(deviceID))
-			deviceBucket.Put([]byte("ed25519"), []byte(identityKeys["ed25519"]))
-			deviceBucket.Put([]byte("curve25519"), []byte(identityKeys["curve25519"]))
-			deviceBucket.Put([]byte("account"), []byte(olmAccount.Pickle([]byte(""))))
+// StorePubKeys stores the ed25519 and curve25519 public keys at /crypto/<userID>/<deviceID>/
+func (cdb *CryptoDB) StorePubKeys(userID, deviceID, ed25519, curve25519 string) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		deviceBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID)).Bucket([]byte(deviceID))
+		deviceBucket.Put([]byte("ed25519"), []byte(ed25519))
+		deviceBucket.Put([]byte("curve25519"), []byte(curve25519))
+		return nil
+	})
+	return err
+}
+
+// StoreOlmSession stores an olm.Session at /crypto/<userID>/<deviceID>/olm/<olmSession.ID>
+func (cdb *CryptoDB) StoreOlmSession(userID, deviceID string, olmSession *olm.Session) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		olmSessionsBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID)).Bucket([]byte(deviceID)).Bucket([]byte("olm"))
+		olmSessionsBucket.Put([]byte(olmSession.ID()), []byte(olmSession.Pickle([]byte(""))))
+		return nil
+	})
+	return err
+}
+
+// StoreMegolmInSession stores an olm.InboundGroupSession at /crypto/<userID>/<deviceID>/megolm_in/<megolmInSession.ID>
+func (cdb *CryptoDB) StoreMegolmInSession(userID, deviceID string, megolmInSession *olm.InboundGroupSession) error {
+}
+
+// StoreMegolmOutSession stores an olm.OutboundGroupSession at /crypto/<userID>/<deviceID>/megolm_out/<megolmOutSession.ID>
+func (cdb *CryptoDB) StoreMegolmOutSession(userID, deviceID string, megolmOutSession *olm.OutboundGroupSession) error {
+}
+
+// LoadUser loads the User at /crypto/<userID>/
+func (cdb *CryptoDB) LoadUser(userID string) (*User, error) {
+	var user User
+	err := db.View(func(tx *bolt.Tx) error {
+		userBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID))
+		err := userBucket.ForEach(func(deviceID, v []byte) error {
+			deviceBucket := userBucket.Bucket(deviceID)
+			device := &Device{
+				ID:          string(deviceID),
+				IdentityKey: string(deviceBucket.Get([]byte("ed25519"))),
+				SigningKey:  string(deviceBucket.Get([]byte("curve25519"))),
+			}
+			olmSessionsBucket := deviceBucket.Bucket([]byte("olm"))
+			err := olmSessionsBucket.ForEach(func(sessionID, session []byte) error {
+				device.OlmSessions[string(sessionID)] = &SessionFromPickled(string(session))
+			})
+			if err != nil {
+				return err
+			}
+			megolmInSessionsBucket := deviceBucket.Bucket([]byte("megolm_in"))
+			err := megolmInSessionsBucket.ForEach(func(sessionID, session []byte) error {
+				device.MegolmInSessions[string(sessionID)] = &olm.InboundGroupSessionFromPickled(string(session))
+			})
+			if err != nil {
+				return err
+			}
+			user.Devices[string(deviceID)] = device
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	return &user, nil
+}
 
-	// Load my user olm account from DB
+// LoadMyUser loads the MyUser at /crypto/<userID>/
+func (cdb *CryptoDB) LoadMyUser(userID string) (*MyUser, error) {
+	var user MyUser
+	err := db.View(func(tx *bolt.Tx) error {
+		userBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID))
+		err := userBucket.ForEach(func(deviceID, v []byte) error {
+			deviceBucket := userBucket.Bucket(deviceID)
+			device := &MyDevice{
+				ID:          string(deviceID),
+				IdentityKey: string(deviceBucket.Get([]byte("ed25519"))),
+				SigningKey:  string(deviceBucket.Get([]byte("curve25519"))),
+			}
+			device.OlmAccount = &olm.AccountFromPickled(string(deviceBucket.Get([]byte("account"))))
+			megolmOutSessionsBucket := deviceBucket.Bucket([]byte("megolm_out"))
+			err := megolmOutSessionsBucket.ForEach(func(sessionID, session []byte) error {
+				device.MegolmOutSessions[string(sessionID)] = &olm.OutboundGroupSessionFromPickled(string(session))
+			})
+			if err != nil {
+				return err
+			}
+			user.Devices[string(deviceID)] = device
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// StoreOlmAccount stores an olm.Account at /crypto/<userID>/<deviceID>/
+func (cdb *CryptoDB) StoreOlmAccount(userID, deviceID string, olmAccount *olm.Account) error {
+	ed25519, curve25519 := olmAccount.IdentityKeys()
+
+	err := db.Update(func(tx *bolt.Tx) error {
+		deviceBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID)).Bucket([]byte(deviceID))
+		deviceBucket.Put([]byte("ed25519"), []byte(ed25519))
+		deviceBucket.Put([]byte("curve25519"), []byte(curve25519))
+		deviceBucket.Put([]byte("account"), []byte(olmAccount.Pickle([]byte(""))))
+		return nil
+	})
+	return err
+}
+
+// LoadOlmAccount loads the olm.Account at /crypto/<userID>/<deviceID>/
+func (cdb *CryptoDB) LoadOlmAccount(userID, deviceID string) (*olm.Account, error) {
 	identityKeys := map[string]string{}
 	var pickledAccount string
 	db.Update(func(tx *bolt.Tx) error {
@@ -116,9 +276,82 @@ func main() {
 	})
 	olmAccount, err := olm.AccountFromPickled(pickledAccount, []byte(""))
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	fmt.Println("Identity keys:", olmAccount.IdentityKeys())
+	return olmAccount, nil
+}
+
+func SplitAlgorithmKeyID(algorithmKeyID string) (string, string) {
+	algorithmKeyIDSlice := strings.Split(algorithmKeyID, ":")
+	if len(algorithmKeyIDSlice) != 2 {
+		return "", ""
+	}
+	return algorithmKeyIDSlice[0], algorithmKeyIDSlice[1]
+}
+
+func main() {
+	db, err := OpenCryptoDB("test.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	//// Create base buckets, create my user and device buckets, check for existence of an olm account
+	//userCryptoExists := false
+	//db.Update(func(tx *bolt.Tx) error {
+	//	cryptoBucket, err := tx.CreateBucketIfNotExists([]byte("crypto"))
+	//	if err != nil {
+	//		return fmt.Errorf("create bucket: %s", err)
+	//	}
+	//	userBucket, err := cryptoBucket.CreateBucketIfNotExists([]byte(userID))
+	//	if err != nil {
+	//		return fmt.Errorf("create bucket: %s", err)
+	//	}
+	//	deviceBucket, err := userBucket.CreateBucketIfNotExists([]byte(deviceID))
+	//	if err != nil {
+	//		return fmt.Errorf("create bucket: %s", err)
+	//	}
+	//	v := deviceBucket.Get([]byte("ed25519"))
+	//	if v != nil {
+	//		userCryptoExists = true
+	//	}
+	//	return nil
+	//})
+
+	//// Create a new olm account if it doesn't exists and store it in the DB
+	//if !userCryptoExists {
+	//	olmAccount := olm.NewAccount()
+	//	identityKeysJSON := olmAccount.IdentityKeys()
+	//	identityKeys := map[string]string{}
+	//	err = json.Unmarshal([]byte(identityKeysJSON), &identityKeys)
+	//	if err != nil {
+	//		panic(err)
+	//	}
+
+	//	db.Update(func(tx *bolt.Tx) error {
+	//		deviceBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID)).Bucket([]byte(deviceID))
+	//		deviceBucket.Put([]byte("ed25519"), []byte(identityKeys["ed25519"]))
+	//		deviceBucket.Put([]byte("curve25519"), []byte(identityKeys["curve25519"]))
+	//		deviceBucket.Put([]byte("account"), []byte(olmAccount.Pickle([]byte(""))))
+	//		return nil
+	//	})
+	//}
+
+	// Load my user olm account from DB
+	//identityKeys := map[string]string{}
+	//var pickledAccount string
+	//db.Update(func(tx *bolt.Tx) error {
+	//	deviceBucket := tx.Bucket([]byte("crypto")).Bucket([]byte(userID)).Bucket([]byte(deviceID))
+	//	identityKeys["ed25519"] = string(deviceBucket.Get([]byte("ed25519")))
+	//	identityKeys["curve25519"] = string(deviceBucket.Get([]byte("curve25519")))
+	//	pickledAccount = string(deviceBucket.Get([]byte("account")))
+	//	return nil
+	//})
+	//olmAccount, err := olm.AccountFromPickled(pickledAccount, []byte(""))
+	//if err != nil {
+	//	panic(err)
+	//}
+	//fmt.Println("Identity keys:", olmAccount.IdentityKeys())
 
 	cli, _ := gomatrix.NewClient(homeserver, "", "")
 	cli.Prefix = "/_matrix/client/unstable"
@@ -213,6 +446,7 @@ func main() {
 	}
 	fmt.Printf("%+v\n", respClaim)
 
+	var oneTimeKey string
 	for theirDeviceID, algorithmKey := range respClaim.OneTimeKeys[theirUser.ID] {
 		for algorithmKeyID, rawOTK := range algorithmKey {
 			algorithm, _ := SplitAlgorithmKeyID(algorithmKeyID)
@@ -226,7 +460,7 @@ func main() {
 				//fmt.Printf("OTK: %+v\n", OTK)
 				device, ok := theirUser.Devices[theirDeviceID]
 				if ok {
-					device.OneTimeKey = OTK.Key
+					oneTimeKey = OTK.Key
 				}
 			}
 		}
@@ -255,7 +489,7 @@ func main() {
 
 	for deviceID, device := range theirUser.Devices {
 		olmSession, err := olmAccount.NewOutboundSession(device.IdentityKey,
-			device.OneTimeKey)
+			oneTimeKey)
 		if err != nil {
 			panic(err)
 		}

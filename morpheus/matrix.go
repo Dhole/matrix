@@ -895,6 +895,7 @@ type Callbacks struct {
 type Rooms struct {
 	R    []*Room
 	byID map[string]*Room
+	// toDevice map[string]*ToDevice userID->*ToDevice
 	// TODO: Implement setting and updating byName
 	byName      map[string][]*Room
 	consoleRoom *Room

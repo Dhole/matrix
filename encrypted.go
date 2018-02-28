@@ -8,6 +8,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	olm "gitlab.com/dhole/go-olm"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 var userID = "@ray_test:matrix.org"
 var username = "ray_test"
 var homeserver = "https://matrix.org"
-var password = "CiIYIrD3OtSuudJB"
+var password = ""
 var deviceID = "5un3HpnWE"
 var deviceDisplayName = "go-olm-dev"
 
@@ -38,12 +39,12 @@ type MyDevice struct {
 	MegolmOutSessions map[string]*olm.OutboundGroupSession // key:room_id
 }
 
-type User struct {
+type UserDevices struct {
 	ID      string
 	Devices map[string]*Device
 }
 
-type MyUser struct {
+type MyUserDevice struct {
 	ID     string
 	Device *MyDevice
 }
@@ -51,6 +52,19 @@ type MyUser struct {
 type SessionsID struct {
 	olmSessionID      string
 	megolmInSessionID string
+}
+
+var rooms map[string]*Room // roomID->*Room
+
+type Room struct {
+	id    string
+	name  string
+	Users map[string]*User // userID->*User
+}
+
+type User struct {
+	id   string
+	name string
 }
 
 type RoomsSessionsID struct {
@@ -111,17 +125,19 @@ type SignedKey struct {
 	Signatures map[string]map[string]string `json:"signatures"`
 }
 
+var db *CryptoDB
+
 type CryptoDB struct {
 	db *bolt.DB
 }
 
 // OpenCryptoDB opens the DB and initializes the /crypto bucket if necessary
-func OpenCryptoDB(filename string) (CryptoDB, error) {
+func OpenCryptoDB(filename string) (*CryptoDB, error) {
 	var cdb CryptoDB
 	db, err := bolt.Open(filename, 0660, &bolt.Options{Timeout: 200 * time.Millisecond})
 	cdb.db = db
 	if err != nil {
-		return cdb, err
+		return nil, err
 	}
 	// Create base buckets
 	err = cdb.db.Update(func(tx *bolt.Tx) error {
@@ -135,7 +151,7 @@ func OpenCryptoDB(filename string) (CryptoDB, error) {
 		}
 		return nil
 	})
-	return cdb, err
+	return &cdb, err
 }
 
 // Close closes the DB
@@ -304,8 +320,8 @@ func (cdb *CryptoDB) StoreMegolmOutSession(userID, deviceID string,
 	return err
 }
 
-// LoadUser loads the User at /crypto_users/<userID>/
-func (cdb *CryptoDB) LoadUser(user *User) error {
+// LoadUserDevices loads the UserDevices at /crypto_users/<userID>/
+func (cdb *CryptoDB) LoadUserDevices(user *UserDevices) error {
 	err := cdb.db.View(func(tx *bolt.Tx) error {
 		userBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(user.ID))
 		err := userBucket.ForEach(func(deviceID, v []byte) error {
@@ -345,8 +361,8 @@ func (cdb *CryptoDB) LoadUser(user *User) error {
 	return err
 }
 
-// LoadMyUser loads the MyUser at /crypto_users/<userID>/
-func (cdb *CryptoDB) LoadMyUser(myUser *MyUser) error {
+// LoadMyUserDevice loads the MyUserDevice at /crypto_users/<userID>/
+func (cdb *CryptoDB) LoadMyUserDevice(myUser *MyUserDevice) error {
 	err := cdb.db.View(func(tx *bolt.Tx) error {
 		userBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(myUser.ID))
 		err := userBucket.ForEach(func(deviceID, v []byte) error {
@@ -498,7 +514,9 @@ func SplitAlgorithmKeyID(algorithmKeyID string) (string, string) {
 }
 
 func main() {
-	myUser := &MyUser{
+	password = os.Args[1]
+	fmt.Println(password)
+	myUser := &MyUserDevice{
 		ID: userID,
 		Device: &MyDevice{
 			ID: deviceID,
@@ -520,7 +538,7 @@ func main() {
 			myUser.Device.OlmAccount.IdentityKeysEd25519Curve25519()
 		db.StoreOlmAccount(myUser.ID, myUser.Device.ID, myUser.Device.OlmAccount)
 	} else {
-		err := db.LoadMyUser(myUser)
+		err := db.LoadMyUserDevice(myUser)
 		if err != nil {
 			panic(err)
 		}
@@ -583,7 +601,7 @@ func main() {
 		fmt.Printf("\n")
 	}
 
-	theirUser := &User{
+	theirUser := &UserDevices{
 		//ID:      "@dhole:matrix.org",
 		Devices: make(map[string]*Device),
 	}
@@ -616,7 +634,7 @@ func main() {
 	if !db.ExistsUser(theirUser.ID) {
 		db.AddUser(theirUser.ID)
 	} else {
-		db.LoadUser(theirUser)
+		db.LoadUserDevices(theirUser)
 	}
 	if len(theirUser.Devices) == 0 {
 		respQuery, err := cli.KeysQuery(map[string][]string{theirUser.ID: []string{}}, -1)

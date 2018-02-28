@@ -14,64 +14,207 @@ import (
 	"time"
 )
 
-var userID = "@ray_test:matrix.org"
+var userID = UserID("@ray_test:matrix.org")
 var username = "ray_test"
 var homeserver = "https://matrix.org"
 var password = ""
-var deviceID = "5un3HpnWE"
+var deviceID = DeviceID("5un3HpnWE")
 var deviceDisplayName = "go-olm-dev"
 
+type EncryptionAlg string
+
+const (
+	EncryptionAlgNone   EncryptionAlg = ""
+	EncryptionAlgOlm    EncryptionAlg = "m.olm.v1.curve25519-aes-sha2"
+	EncryptionAlgMegolm EncryptionAlg = "m.megolm.v1.aes-sha2"
+)
+
+type RoomID string
+type UserID string
+type SessionID string
+type DeviceID string
+
+var store Store
+
+var rooms map[RoomID]*Room
+var cli *gomatrix.Client
+
+type Store struct {
+	myUserDevice    *MyUserDevice
+	usersDevices    map[UserID]*UserDevices
+	roomsSessionsID *RoomsSessionsID
+	db              *CryptoDB
+}
+
 type Device struct {
-	ID         string
+	ID         DeviceID
 	Ed25519    string // SigningKey
 	Curve25519 string // IdentityKey
 	//OneTimeKey       string                              // IdentityKey
-	OlmSessions      map[string]*olm.Session             // key:session_id
-	MegolmInSessions map[string]*olm.InboundGroupSession // key:session_id
+	OlmSessions      map[SessionID]*olm.Session
+	MegolmInSessions map[SessionID]*olm.InboundGroupSession
+}
+
+func (d *Device) EncryptOlmMsg(roomID RoomID, userID UserID, eventType string,
+	contentJSON interface{}) interface{} {
+	olmSession, ok := d.OlmSessions[store.roomsSessionsID.GetOlmSessionID(roomID, userID, d.ID)]
+	if !ok {
+		// TODO: Create new olm session
+	}
+	payload := map[string]interface{}{
+		"type":           eventType,
+		"content":        contentJSON,
+		"recipient":      userID,
+		"sender":         store.myUserDevice.ID,
+		"recipient_keys": map[string]string{"ed25519": d.Ed25519},
+		"room_id":        roomID}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(payloadJSON))
+	encryptMsgType, encryptedMsg := olmSession.Encrypt(string(payloadJSON))
+	store.db.StoreOlmSession(userID, d.ID, olmSession)
+
+	return map[string]interface{}{
+		"algorithm": "m.olm.v1.curve25519-aes-sha2",
+		"ciphertext": map[string]map[string]interface{}{
+			d.Curve25519: map[string]interface{}{
+				"type": encryptMsgType,
+				"body": encryptedMsg,
+			},
+		},
+		"device_id":  store.myUserDevice.ID,
+		"sender_key": store.myUserDevice.Device.Curve25519,
+		"session_id": olmSession.ID()}
 }
 
 type MyDevice struct {
-	ID         string
+	ID         DeviceID
 	Ed25519    string // Ed25519
 	Curve25519 string // IdentityKey
 	OlmAccount *olm.Account
 	//OlmSessions       map[string]*olm.Session              // key:room_id
-	MegolmOutSessions map[string]*olm.OutboundGroupSession // key:room_id
+	MegolmOutSessions map[RoomID]*olm.OutboundGroupSession
 }
 
 type UserDevices struct {
-	ID      string
-	Devices map[string]*Device
+	//ID      UserID
+	Devices map[DeviceID]*Device
+	// TODO: Last updated
 }
 
 type MyUserDevice struct {
-	ID     string
+	ID     UserID
 	Device *MyDevice
 }
 
 type SessionsID struct {
-	olmSessionID      string
-	megolmInSessionID string
+	olmSessionID      SessionID
+	megolmInSessionID SessionID
 }
 
-var rooms map[string]*Room // roomID->*Room
-
 type Room struct {
-	id    string
+	id    RoomID
 	name  string
-	Users map[string]*User // userID->*User
+	Users map[UserID]*User
+	// TODO: encryption type
+	encryptionAlg    EncryptionAlg
+	MegolmOutSession *olm.OutboundGroupSession
+}
+
+func (r *Room) SetOlmEncryption() error {
+	return r.SetEncryption(EncryptionAlgOlm)
+}
+
+func (r *Room) SetMegolmEncryption() error {
+	return r.SetEncryption(EncryptionAlgMegolm)
+}
+
+func (r *Room) SetEncryption(encryptionAlg EncryptionAlg) error {
+	if r.encryptionAlg == EncryptionAlgNone {
+		_, err := cli.SendStateEvent(string(r.id), "m.room.encryption", "",
+			map[string]string{"algorithm": string(encryptionAlg)})
+		if err != nil {
+			r.encryptionAlg = encryptionAlg
+		}
+		return err
+	} else {
+		return fmt.Errorf("The room %v already has the encryption algorithm %v set",
+			r.id, r.encryptionAlg)
+	}
+}
+
+func (r *Room) SendText(text string) error {
+	return r.SendMsg("m.room.message", gomatrix.TextMessage{"m.text", text})
+}
+
+func (r *Room) SendMsg(eventType string, contentJSON interface{}) error {
+	switch r.encryptionAlg {
+	case EncryptionAlgNone:
+		return r.sendPlaintextMsg(eventType, contentJSON)
+	case EncryptionAlgOlm:
+		return r.sendOlmMsg(eventType, contentJSON)
+	case EncryptionAlgMegolm:
+		return r.sendMegolmMsg(eventType, contentJSON)
+	}
+	return nil
+}
+
+func (r *Room) sendOlmMsg(eventType string, contentJSON interface{}) error {
+	for userID, _ := range r.Users {
+		userDevices, ok := store.usersDevices[userID]
+		if !ok {
+			// TODO: Get list of devices from userID from cli
+		}
+		for _, device := range userDevices.Devices {
+			contentJSONEnc := device.EncryptOlmMsg(r.id, userID, eventType, contentJSON)
+			_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted",
+				contentJSONEnc)
+			// TODO: Figure out if we want to return early or wait
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// TODO
+func (r *Room) sendMegolmMsg(eventType string, contentJSON interface{}) error {
+	return fmt.Errorf("Not implemented yet")
+}
+
+func (r *Room) sendPlaintextMsg(eventType string, contentJSON interface{}) error {
+	_, err := cli.SendMessageEvent(string(r.id), eventType, contentJSON)
+	return err
+	//return cli.SendMessageEvent(roomID, "m.room.message",
+	//	TextMessage{"m.text", text})
 }
 
 type User struct {
-	id   string
+	id   UserID
 	name string
+	//devices *UserDevices
+}
+
+func (u *User) Devices() *UserDevices {
+	userDevices, ok := store.usersDevices[u.id]
+	if ok {
+		return userDevices
+	} else {
+		// TODO: Maybe request devices?
+		// TODO: Maybe do it asynchronously?
+		return nil
+	}
 }
 
 type RoomsSessionsID struct {
-	roomIDuserIDdeviceID map[string]map[string]map[string]*SessionsID
+	roomIDuserIDdeviceID map[RoomID]map[UserID]map[DeviceID]*SessionsID
 }
 
-func (rs *RoomsSessionsID) getSessionsID(roomID, userID, deviceID string) *SessionsID {
+func (rs *RoomsSessionsID) getSessionsID(roomID RoomID, userID UserID,
+	deviceID DeviceID) *SessionsID {
 	room, ok := rs.roomIDuserIDdeviceID[roomID]
 	if !ok {
 		return nil
@@ -87,15 +230,16 @@ func (rs *RoomsSessionsID) getSessionsID(roomID, userID, deviceID string) *Sessi
 	return sessionsID
 }
 
-func (rs *RoomsSessionsID) makeSessionsID(roomID, userID, deviceID string) *SessionsID {
+func (rs *RoomsSessionsID) makeSessionsID(roomID RoomID, userID UserID,
+	deviceID DeviceID) *SessionsID {
 	room, ok := rs.roomIDuserIDdeviceID[roomID]
 	if !ok {
-		rs.roomIDuserIDdeviceID[roomID] = make(map[string]map[string]*SessionsID)
+		rs.roomIDuserIDdeviceID[roomID] = make(map[UserID]map[DeviceID]*SessionsID)
 		room = rs.roomIDuserIDdeviceID[roomID]
 	}
 	user, ok := room[userID]
 	if !ok {
-		room[userID] = make(map[string]*SessionsID)
+		room[userID] = make(map[DeviceID]*SessionsID)
 		user = room[userID]
 	}
 	sessionsID, ok := user[deviceID]
@@ -106,7 +250,7 @@ func (rs *RoomsSessionsID) makeSessionsID(roomID, userID, deviceID string) *Sess
 	return sessionsID
 }
 
-func (rs *RoomsSessionsID) GetOlmSessionID(roomID, userID, deviceID string) string {
+func (rs *RoomsSessionsID) GetOlmSessionID(roomID RoomID, userID UserID, deviceID DeviceID) SessionID {
 	sessionsID := rs.getSessionsID(roomID, userID, deviceID)
 	if sessionsID == nil {
 		return ""
@@ -115,7 +259,8 @@ func (rs *RoomsSessionsID) GetOlmSessionID(roomID, userID, deviceID string) stri
 	}
 }
 
-func (rs *RoomsSessionsID) SetOlmSessionID(roomID, userID, deviceID, sessionID string) {
+func (rs *RoomsSessionsID) SetOlmSessionID(roomID RoomID, userID UserID, deviceID DeviceID,
+	sessionID SessionID) {
 	sessionsID := rs.makeSessionsID(roomID, userID, deviceID)
 	sessionsID.olmSessionID = sessionID
 }
@@ -124,8 +269,6 @@ type SignedKey struct {
 	Key        string                       `json:"key"`
 	Signatures map[string]map[string]string `json:"signatures"`
 }
-
-var db *CryptoDB
 
 type CryptoDB struct {
 	db *bolt.DB
@@ -160,7 +303,7 @@ func (cdb *CryptoDB) Close() {
 }
 
 // ExistsUser checks if /crypto_users/<userID>/ exists
-func (cdb *CryptoDB) ExistsUser(userID string) bool {
+func (cdb *CryptoDB) ExistsUser(userID UserID) bool {
 	userExists := false
 	cdb.db.View(func(tx *bolt.Tx) error {
 		cryptoUsersBucket := tx.Bucket([]byte("crypto_users"))
@@ -175,7 +318,7 @@ func (cdb *CryptoDB) ExistsUser(userID string) bool {
 }
 
 // AddUseradds /crypto_users/<userID>/ bucket
-func (cdb *CryptoDB) AddUser(userID string) error {
+func (cdb *CryptoDB) AddUser(userID UserID) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		cryptoUsersBucket := tx.Bucket([]byte("crypto_users"))
 		_, err := cryptoUsersBucket.CreateBucketIfNotExists([]byte(userID))
@@ -188,7 +331,7 @@ func (cdb *CryptoDB) AddUser(userID string) error {
 }
 
 // ExistsUserDevice checks if /crypto_users/<userID>/<deviceID>/ exists
-func (cdb *CryptoDB) ExistsUserDevice(userID, deviceID string) bool {
+func (cdb *CryptoDB) ExistsUserDevice(userID UserID, deviceID DeviceID) bool {
 	deviceExists := false
 	cdb.db.View(func(tx *bolt.Tx) error {
 		cryptoUsersBucket := tx.Bucket([]byte("crypto_users"))
@@ -207,7 +350,7 @@ func (cdb *CryptoDB) ExistsUserDevice(userID, deviceID string) bool {
 }
 
 // AddUserDevice adds /crypto_users/<userID>/<deviceID>/{olm,megolm_in}/ buckets
-func (cdb *CryptoDB) AddUserDevice(userID, deviceID string) error {
+func (cdb *CryptoDB) AddUserDevice(userID UserID, deviceID DeviceID) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		cryptoUsersBucket := tx.Bucket([]byte("crypto_users"))
 		userBucket, err := cryptoUsersBucket.CreateBucketIfNotExists([]byte(userID))
@@ -232,7 +375,7 @@ func (cdb *CryptoDB) AddUserDevice(userID, deviceID string) error {
 }
 
 // AddMyUserMyDevice adds /crypto_users/<userID>/<deviceID>/megolm_out/ buckets
-func (cdb *CryptoDB) AddMyUserMyDevice(userID, deviceID string) error {
+func (cdb *CryptoDB) AddMyUserMyDevice(userID UserID, deviceID DeviceID) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		cryptoUsersBucket := tx.Bucket([]byte("crypto_users"))
 		userBucket, err := cryptoUsersBucket.CreateBucketIfNotExists([]byte(userID))
@@ -254,7 +397,7 @@ func (cdb *CryptoDB) AddMyUserMyDevice(userID, deviceID string) error {
 
 // ExistsPubKeys checks if the ed25519 and curve25519 public keys exist at
 // /crypto_users/<userID>/<deviceID>/
-func (cdb *CryptoDB) ExistsPubKeys(userID, deviceID string) bool {
+func (cdb *CryptoDB) ExistsPubKeys(userID UserID, deviceID DeviceID) bool {
 	pubKeysExist := false
 	cdb.db.View(func(tx *bolt.Tx) error {
 		deviceBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(userID)).
@@ -270,7 +413,8 @@ func (cdb *CryptoDB) ExistsPubKeys(userID, deviceID string) bool {
 }
 
 // StorePubKeys stores the ed25519 and curve25519 public keys at /crypto_users/<userID>/<deviceID>/
-func (cdb *CryptoDB) StorePubKeys(userID, deviceID, ed25519, curve25519 string) error {
+func (cdb *CryptoDB) StorePubKeys(userID UserID, deviceID DeviceID,
+	ed25519, curve25519 string) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		deviceBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(userID)).
 			Bucket([]byte(deviceID))
@@ -282,7 +426,8 @@ func (cdb *CryptoDB) StorePubKeys(userID, deviceID, ed25519, curve25519 string) 
 }
 
 // StoreOlmSession stores an olm.Session at /crypto_users/<userID>/<deviceID>/olm/<olmSession.ID>
-func (cdb *CryptoDB) StoreOlmSession(userID, deviceID string, olmSession *olm.Session) error {
+func (cdb *CryptoDB) StoreOlmSession(userID UserID, deviceID DeviceID,
+	olmSession *olm.Session) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		olmSessionsBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(userID)).
 			Bucket([]byte(deviceID)).Bucket([]byte("olm"))
@@ -294,7 +439,7 @@ func (cdb *CryptoDB) StoreOlmSession(userID, deviceID string, olmSession *olm.Se
 
 // StoreMegolmInSession stores an olm.InboundGroupSession at
 // /crypto_users/<userID>/<deviceID>/megolm_in/<megolmInSession.ID>
-func (cdb *CryptoDB) StoreMegolmInSession(userID, deviceID string,
+func (cdb *CryptoDB) StoreMegolmInSession(userID UserID, deviceID DeviceID,
 	megolmInSession *olm.InboundGroupSession) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		megolmInSessionsBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(userID)).
@@ -308,7 +453,7 @@ func (cdb *CryptoDB) StoreMegolmInSession(userID, deviceID string,
 
 // StoreMegolmOutSession stores an olm.OutboundGroupSession at
 // /crypto_users/<userID>/<deviceID>/megolm_out/<megolmOutSession.ID>
-func (cdb *CryptoDB) StoreMegolmOutSession(userID, deviceID string,
+func (cdb *CryptoDB) StoreMegolmOutSession(userID UserID, deviceID DeviceID,
 	megolmOutSession *olm.OutboundGroupSession) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		megolmOutSessionsBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(userID)).
@@ -327,16 +472,16 @@ func (cdb *CryptoDB) LoadUserDevices(user *UserDevices) error {
 		err := userBucket.ForEach(func(deviceID, v []byte) error {
 			deviceBucket := userBucket.Bucket(deviceID)
 			device := &Device{
-				ID:               string(deviceID),
+				ID:               DeviceID(deviceID),
 				Ed25519:          string(deviceBucket.Get([]byte("ed25519"))),
 				Curve25519:       string(deviceBucket.Get([]byte("curve25519"))),
-				OlmSessions:      make(map[string]*olm.Session),
-				MegolmInSessions: make(map[string]*olm.InboundGroupSession),
+				OlmSessions:      make(map[SessionID]*olm.Session),
+				MegolmInSessions: make(map[SessionID]*olm.InboundGroupSession),
 			}
 			olmSessionsBucket := deviceBucket.Bucket([]byte("olm"))
 			err := olmSessionsBucket.ForEach(func(sessionID, session []byte) error {
 				var err error
-				device.OlmSessions[string(sessionID)], err =
+				device.OlmSessions[SessionID(sessionID)], err =
 					olm.SessionFromPickled(string(session), []byte(""))
 				return err
 			})
@@ -346,14 +491,14 @@ func (cdb *CryptoDB) LoadUserDevices(user *UserDevices) error {
 			megolmInSessionsBucket := deviceBucket.Bucket([]byte("megolm_in"))
 			err = megolmInSessionsBucket.ForEach(func(sessionID, session []byte) error {
 				var err error
-				device.MegolmInSessions[string(sessionID)], err =
+				device.MegolmInSessions[SessionID(sessionID)], err =
 					olm.InboundGroupSessionFromPickled(string(session), []byte(""))
 				return err
 			})
 			if err != nil {
 				return err
 			}
-			user.Devices[string(deviceID)] = device
+			user.Devices[DeviceID(deviceID)] = device
 			return nil
 		})
 		return err
@@ -368,10 +513,10 @@ func (cdb *CryptoDB) LoadMyUserDevice(myUser *MyUserDevice) error {
 		err := userBucket.ForEach(func(deviceID, v []byte) error {
 			deviceBucket := userBucket.Bucket(deviceID)
 			device := &MyDevice{
-				ID:                string(deviceID),
+				ID:                DeviceID(deviceID),
 				Ed25519:           string(deviceBucket.Get([]byte("ed25519"))),
 				Curve25519:        string(deviceBucket.Get([]byte("curve25519"))),
-				MegolmOutSessions: make(map[string]*olm.OutboundGroupSession),
+				MegolmOutSessions: make(map[RoomID]*olm.OutboundGroupSession),
 			}
 			var err error
 			device.OlmAccount, err = olm.AccountFromPickled(
@@ -380,9 +525,9 @@ func (cdb *CryptoDB) LoadMyUserDevice(myUser *MyUserDevice) error {
 				return err
 			}
 			megolmOutSessionsBucket := deviceBucket.Bucket([]byte("megolm_out"))
-			err = megolmOutSessionsBucket.ForEach(func(sessionID, session []byte) error {
+			err = megolmOutSessionsBucket.ForEach(func(roomID, session []byte) error {
 				var err error
-				device.MegolmOutSessions[string(sessionID)], err =
+				device.MegolmOutSessions[RoomID(roomID)], err =
 					olm.OutboundGroupSessionFromPickled(string(session), []byte(""))
 				return err
 			})
@@ -404,7 +549,7 @@ func (cdb *CryptoDB) LoadMyUserDevice(myUser *MyUserDevice) error {
 }
 
 // ExistsOlmAccount checks if an olm.Account exists at /crypto_users/<userID>/<deviceID>/
-func (cdb *CryptoDB) ExistsOlmAccount(userID, deviceID string) bool {
+func (cdb *CryptoDB) ExistsOlmAccount(userID UserID, deviceID DeviceID) bool {
 	olmAccountExists := false
 	cdb.db.View(func(tx *bolt.Tx) error {
 		deviceBucket := tx.Bucket([]byte("crypto_users")).Bucket([]byte(userID)).
@@ -421,7 +566,7 @@ func (cdb *CryptoDB) ExistsOlmAccount(userID, deviceID string) bool {
 }
 
 // StoreOlmAccount stores an olm.Account at /crypto_users/<userID>/<deviceID>/
-func (cdb *CryptoDB) StoreOlmAccount(userID, deviceID string, olmAccount *olm.Account) error {
+func (cdb *CryptoDB) StoreOlmAccount(userID UserID, deviceID DeviceID, olmAccount *olm.Account) error {
 	ed25519, curve25519 := olmAccount.IdentityKeysEd25519Curve25519()
 
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
@@ -436,7 +581,7 @@ func (cdb *CryptoDB) StoreOlmAccount(userID, deviceID string, olmAccount *olm.Ac
 }
 
 // LoadOlmAccount loads the olm.Account at /crypto_users/<userID>/<deviceID>/
-func (cdb *CryptoDB) LoadOlmAccount(userID, deviceID string) (*olm.Account, error) {
+func (cdb *CryptoDB) LoadOlmAccount(userID UserID, deviceID DeviceID) (*olm.Account, error) {
 	identityKeys := map[string]string{}
 	var pickledAccount string
 	err := cdb.db.View(func(tx *bolt.Tx) error {
@@ -459,7 +604,7 @@ func (cdb *CryptoDB) LoadOlmAccount(userID, deviceID string) (*olm.Account, erro
 
 // StoreOlmSessioID stores an olm.Account at
 // /crypto_rooms/<roomID>/<userID>/<deviceID>/olm_session_id
-func (cdb *CryptoDB) StoreOlmSessioID(roomID, userID, deviceID, sessionID string) error {
+func (cdb *CryptoDB) StoreOlmSessioID(roomID RoomID, userID UserID, deviceID DeviceID, sessionID SessionID) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
 		cryptoRoomsBucket := tx.Bucket([]byte("crypto_rooms"))
 		roomBucket, err := cryptoRoomsBucket.CreateBucketIfNotExists([]byte(roomID))
@@ -481,9 +626,9 @@ func (cdb *CryptoDB) StoreOlmSessioID(roomID, userID, deviceID, sessionID string
 }
 
 // LoadRoomsSessionsID loads the RoomsSessionsID at /crypto_rooms/<roomID>/
-func (cdb *CryptoDB) LoadRoomsSessionsID(roomID string) (*RoomsSessionsID, error) {
+func (cdb *CryptoDB) LoadRoomsSessionsID(roomID RoomID) (*RoomsSessionsID, error) {
 	roomsSessionsID := RoomsSessionsID{
-		roomIDuserIDdeviceID: make(map[string]map[string]map[string]*SessionsID),
+		roomIDuserIDdeviceID: make(map[RoomID]map[UserID]map[DeviceID]*SessionsID),
 	}
 	err := cdb.db.View(func(tx *bolt.Tx) error {
 		roomBucket := tx.Bucket([]byte("crypto_rooms")).Bucket([]byte(roomID))
@@ -493,8 +638,8 @@ func (cdb *CryptoDB) LoadRoomsSessionsID(roomID string) (*RoomsSessionsID, error
 				deviceBucket := userBucket.Bucket(deviceID)
 				olmSessionID := deviceBucket.Get([]byte("olm_session_id"))
 				if olmSessionID != nil {
-					roomsSessionsID.SetOlmSessionID(roomID, string(userID),
-						string(deviceID), string(olmSessionID))
+					roomsSessionsID.SetOlmSessionID(roomID, UserID(userID),
+						DeviceID(deviceID), SessionID(olmSessionID))
 				}
 				return nil
 			})
@@ -516,7 +661,7 @@ func SplitAlgorithmKeyID(algorithmKeyID string) (string, string) {
 func main() {
 	password = os.Args[1]
 	fmt.Println(password)
-	myUser := &MyUserDevice{
+	store.myUserDevice = &MyUserDevice{
 		ID: userID,
 		Device: &MyDevice{
 			ID: deviceID,
@@ -526,24 +671,27 @@ func main() {
 	db, err := OpenCryptoDB("test.db")
 	if err != nil {
 		log.Fatal(err)
-	}
-	defer db.Close()
-
-	if !db.ExistsUserDevice(myUser.ID, myUser.Device.ID) {
-		db.AddMyUserMyDevice(myUser.ID, myUser.Device.ID)
-	}
-	if !db.ExistsOlmAccount(myUser.ID, myUser.Device.ID) {
-		myUser.Device.OlmAccount = olm.NewAccount()
-		myUser.Device.Ed25519, myUser.Device.Curve25519 =
-			myUser.Device.OlmAccount.IdentityKeysEd25519Curve25519()
-		db.StoreOlmAccount(myUser.ID, myUser.Device.ID, myUser.Device.OlmAccount)
 	} else {
-		err := db.LoadMyUserDevice(myUser)
+		store.db = db
+	}
+	defer store.db.Close()
+
+	if !store.db.ExistsUserDevice(store.myUserDevice.ID, store.myUserDevice.Device.ID) {
+		store.db.AddMyUserMyDevice(store.myUserDevice.ID, store.myUserDevice.Device.ID)
+	}
+	if !store.db.ExistsOlmAccount(store.myUserDevice.ID, store.myUserDevice.Device.ID) {
+		store.myUserDevice.Device.OlmAccount = olm.NewAccount()
+		store.myUserDevice.Device.Ed25519, store.myUserDevice.Device.Curve25519 =
+			store.myUserDevice.Device.OlmAccount.IdentityKeysEd25519Curve25519()
+		store.db.StoreOlmAccount(store.myUserDevice.ID, store.myUserDevice.Device.ID,
+			store.myUserDevice.Device.OlmAccount)
+	} else {
+		err := store.db.LoadMyUserDevice(store.myUserDevice)
 		if err != nil {
 			panic(err)
 		}
 	}
-	fmt.Println("Identity keys:", myUser.Device.Ed25519, myUser.Device.Curve25519)
+	fmt.Println("Identity keys:", store.myUserDevice.Device.Ed25519, store.myUserDevice.Device.Curve25519)
 
 	cli, _ := gomatrix.NewClient(homeserver, "", "")
 	cli.Prefix = "/_matrix/client/unstable"
@@ -552,16 +700,16 @@ func main() {
 		Type:                     "m.login.password",
 		User:                     username,
 		Password:                 password,
-		DeviceID:                 deviceID,
+		DeviceID:                 string(deviceID),
 		InitialDeviceDisplayName: deviceDisplayName,
 	})
 	if err != nil {
 		panic(err)
 	}
 	cli.SetCredentials(res.UserID, res.AccessToken)
-	myUser.ID = res.UserID
+	store.myUserDevice.ID = UserID(res.UserID)
 
-	roomUsers := make(map[string][]string)
+	roomUsers := make(map[RoomID][]UserID)
 	joinedRooms, err := cli.JoinedRooms()
 	if err != nil {
 		panic(err)
@@ -577,12 +725,12 @@ func main() {
 		}
 		fmt.Printf("%02d %s\n", i, roomID)
 		count := 0
-		usersID := []string{}
+		usersID := []UserID{}
 		for userID, userDetails := range joinedMembers.Joined {
-			if userID == myUser.ID {
+			if UserID(userID) == store.myUserDevice.ID {
 				continue
 			}
-			usersID = append(usersID, userID)
+			usersID = append(usersID, UserID(userID))
 			dispName := userDetails.DisplayName
 			count++
 			if count == 6 && len(joinedMembers.Joined) > 6 {
@@ -597,54 +745,54 @@ func main() {
 				fmt.Printf("\t%s\n", userID)
 			}
 		}
-		roomUsers[roomID] = usersID
+		roomUsers[RoomID(roomID)] = usersID
 		fmt.Printf("\n")
 	}
 
 	theirUser := &UserDevices{
 		//ID:      "@dhole:matrix.org",
-		Devices: make(map[string]*Device),
+		Devices: make(map[DeviceID]*Device),
 	}
 
 	fmt.Printf("Select room number or press enter for new room: ")
 	var input string
 	fmt.Scanln(&input)
 	roomIdx, err := strconv.Atoi(input)
-	var roomID string
+	var roomID RoomID
 	if err != nil {
 		fmt.Println("Creating new room...")
 		fmt.Printf("Write user ID to invite: ")
 		fmt.Scanln(&input)
 		if input != "" {
-			theirUser.ID = input
+			theirUser.ID = UserID(input)
 		}
 		resp, err := cli.CreateRoom(&gomatrix.ReqCreateRoom{
-			Invite: []string{theirUser.ID},
+			Invite: []string{string(theirUser.ID)},
 		})
 		if err != nil {
 			panic(err)
 		}
-		roomID = resp.RoomID
+		roomID = RoomID(resp.RoomID)
 	} else {
-		roomID = joinedRooms.JoinedRooms[roomIdx]
+		roomID = RoomID(joinedRooms.JoinedRooms[roomIdx])
 		fmt.Println("Selected room is", joinedRooms.JoinedRooms[roomIdx])
-		theirUser.ID = roomUsers[roomID][0]
+		theirUser.ID = roomUsers[RoomID(roomID)][0]
 	}
 
-	if !db.ExistsUser(theirUser.ID) {
-		db.AddUser(theirUser.ID)
+	if !store.db.ExistsUser(theirUser.ID) {
+		store.db.AddUser(theirUser.ID)
 	} else {
-		db.LoadUserDevices(theirUser)
+		store.db.LoadUserDevices(theirUser)
 	}
 	if len(theirUser.Devices) == 0 {
-		respQuery, err := cli.KeysQuery(map[string][]string{theirUser.ID: []string{}}, -1)
+		respQuery, err := cli.KeysQuery(map[string][]string{string(theirUser.ID): []string{}}, -1)
 		if err != nil {
 			panic(err)
 		}
 		fmt.Printf("%+v\n", respQuery)
-		for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[theirUser.ID] {
+		for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[string(theirUser.ID)] {
 			device := &Device{
-				ID: theirDeviceID,
+				ID: DeviceID(theirDeviceID),
 			}
 			for algorithmKeyID, key := range deviceKeys.Keys {
 				algorithm, theirDeviceID2 := SplitAlgorithmKeyID(algorithmKeyID)
@@ -662,22 +810,22 @@ func main() {
 				// TODO: Handle this case properly
 				continue
 			}
-			db.AddUserDevice(theirUser.ID, theirDeviceID)
-			db.StorePubKeys(theirUser.ID, device.ID, device.Ed25519, device.Curve25519)
+			store.db.AddUserDevice(theirUser.ID, DeviceID(theirDeviceID))
+			store.db.StorePubKeys(theirUser.ID, device.ID, device.Ed25519, device.Curve25519)
 			theirUser.Devices[device.ID] = device
 		}
 	}
 
-	roomsSessionsID, err := db.LoadRoomsSessionsID(roomID)
+	store.roomsSessionsID, err = store.db.LoadRoomsSessionsID(roomID)
 	if err != nil {
 		panic(err)
 	}
 
-	deviceKeysAlgorithms := map[string]map[string]string{theirUser.ID: map[string]string{}}
+	deviceKeysAlgorithms := map[string]map[string]string{string(theirUser.ID): map[string]string{}}
 	keysToClaim := 0
 	for theirDeviceID, _ := range theirUser.Devices {
-		if roomsSessionsID.GetOlmSessionID(roomID, theirUser.ID, theirDeviceID) == "" {
-			deviceKeysAlgorithms[theirUser.ID][theirDeviceID] = "signed_curve25519"
+		if store.roomsSessionsID.GetOlmSessionID(roomID, theirUser.ID, theirDeviceID) == "" {
+			deviceKeysAlgorithms[string(theirUser.ID)][string(theirDeviceID)] = "signed_curve25519"
 			keysToClaim++
 		}
 	}
@@ -691,8 +839,8 @@ func main() {
 		fmt.Printf("%+v\n", respClaim)
 
 		var oneTimeKey string
-		for theirDeviceID, _ := range deviceKeysAlgorithms[theirUser.ID] {
-			algorithmKey, ok := respClaim.OneTimeKeys[theirUser.ID][theirDeviceID]
+		for theirDeviceID, _ := range deviceKeysAlgorithms[string(theirUser.ID)] {
+			algorithmKey, ok := respClaim.OneTimeKeys[string(theirUser.ID)][theirDeviceID]
 			if !ok {
 				panic(fmt.Sprint("One time key for device", theirDeviceID, "not returned"))
 			}
@@ -706,18 +854,18 @@ func main() {
 						panic(err)
 					}
 					//fmt.Printf("OTK: %+v\n", OTK)
-					_, ok := theirUser.Devices[theirDeviceID]
+					_, ok := theirUser.Devices[DeviceID(theirDeviceID)]
 					if ok {
-						device := theirUser.Devices[theirDeviceID]
+						device := theirUser.Devices[DeviceID(theirDeviceID)]
 						oneTimeKey = OTK.Key
-						olmSession, err := myUser.Device.OlmAccount.NewOutboundSession(device.Curve25519,
+						olmSession, err := store.myUserDevice.Device.OlmAccount.NewOutboundSession(device.Curve25519,
 							oneTimeKey)
 						if err != nil {
 							panic(err)
 						}
-						db.StoreOlmSession(theirUser.ID, device.ID, olmSession)
-						db.StoreOlmSessioID(roomID, theirUser.ID, device.ID, olmSession.ID())
-						device.OlmSessions[olmSession.ID()] = olmSession
+						store.db.StoreOlmSession(theirUser.ID, device.ID, olmSession)
+						store.db.StoreOlmSessioID(roomID, theirUser.ID, device.ID, SessionID(olmSession.ID()))
+						device.OlmSessions[SessionID(olmSession.ID())] = olmSession
 					}
 				}
 			}
@@ -733,16 +881,16 @@ func main() {
 
 	text := fmt.Sprint("I'm encrypted :D ~ ", time.Now().Format("2006-01-02 15:04:05"))
 
-	cli.SendStateEvent(roomID, "m.room.encryption", "",
+	cli.SendStateEvent(string(roomID), "m.room.encryption", "",
 		map[string]string{"algorithm": "m.olm.v1.curve25519-aes-sha2"})
 
 	for _, device := range theirUser.Devices {
-		olmSession := device.OlmSessions[roomsSessionsID.GetOlmSessionID(roomID, theirUser.ID, device.ID)]
+		olmSession := device.OlmSessions[store.roomsSessionsID.GetOlmSessionID(roomID, theirUser.ID, device.ID)]
 		payload := map[string]interface{}{
 			"type":           "m.room.message",
 			"content":        gomatrix.TextMessage{MsgType: "m.text", Body: text},
 			"recipient":      theirUser.ID,
-			"sender":         myUser.ID,
+			"sender":         store.myUserDevice.ID,
 			"recipient_keys": map[string]string{"ed25519": device.Ed25519},
 			"room_id":        roomID}
 		payloadJSON, err := json.Marshal(payload)
@@ -751,9 +899,9 @@ func main() {
 		}
 		fmt.Println(string(payloadJSON))
 		encryptMsgType, encryptedMsg := olmSession.Encrypt(string(payloadJSON))
-		db.StoreOlmSession(theirUser.ID, device.ID, olmSession)
+		store.db.StoreOlmSession(theirUser.ID, device.ID, olmSession)
 
-		cli.SendMessageEvent(roomID, "m.room.encrypted",
+		cli.SendMessageEvent(string(roomID), "m.room.encrypted",
 			map[string]interface{}{
 				"algorithm": "m.olm.v1.curve25519-aes-sha2",
 				"ciphertext": map[string]map[string]interface{}{
@@ -762,8 +910,8 @@ func main() {
 						"body": encryptedMsg,
 					},
 				},
-				"device_id":  myUser.ID,
-				"sender_key": myUser.Device.Curve25519,
+				"device_id":  store.myUserDevice.ID,
+				"sender_key": store.myUserDevice.Device.Curve25519,
 				"session_id": olmSession.ID()})
 	}
 

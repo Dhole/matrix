@@ -5,6 +5,7 @@ import (
 	"github.com/boltdb/bolt"
 	"os"
 	"time"
+	"unicode/utf8"
 )
 
 func pad(length int) {
@@ -17,7 +18,13 @@ func recurse(b *bolt.Bucket, lvl int) {
 		pad(lvl * 2)
 		fmt.Printf("%s: ", string(key))
 		if value != nil {
-			fmt.Printf("%s\n", string(value))
+			var s string
+			if !utf8.Valid(value) || len(value) <= 8 {
+				s = fmt.Sprintf("%v", value)
+			} else {
+				s = string(value)
+			}
+			fmt.Printf("%s\n", s)
 		} else {
 			fmt.Printf("{\n")
 			recurse(b.Bucket(key), lvl+1)

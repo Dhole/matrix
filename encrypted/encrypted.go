@@ -333,6 +333,7 @@ func (me *MyUserDevice) KeysUpload() error {
 		return err
 	}
 	olmAccount.GenOneTimeKeys(4)
+	store.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
 	otks := olmAccount.OneTimeKeys()
 	oneTimeKeys := make(map[string]mat.OneTimeKey)
 	for keyID, key := range otks.Curve25519 {
@@ -345,10 +346,16 @@ func (me *MyUserDevice) KeysUpload() error {
 		if err != nil {
 			return err
 		}
-		oneTimeKeys[keyID] = otk
+		oneTimeKeys[fmt.Sprintf("signed_curve25519:%s", keyID)] = otk
 	}
-	// olmAccount.MarkKeysAsPublished()
 	fmt.Printf("\n%+v\n%+v\n", deviceKeys, oneTimeKeys)
+	res, err := cli.KeysUpload(&deviceKeys, oneTimeKeys)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\n%+v\n", res)
+	olmAccount.MarkKeysAsPublished()
+	store.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
 	return nil
 }
 
@@ -1100,12 +1107,6 @@ func main() {
 	}
 	defer store.Close()
 
-	err = store.me.KeysUpload()
-	if err != nil {
-		panic(err)
-	}
-	return
-
 	cli, _ = mat.NewClient(homeserver, "", "")
 	cli.Prefix = "/_matrix/client/unstable"
 	fmt.Println("Logging in...")
@@ -1120,6 +1121,24 @@ func main() {
 		panic(err)
 	}
 	cli.SetCredentials(resLogin.UserID, resLogin.AccessToken)
+
+	//resp, err := cli.KeysQuery(map[string][]string{string(store.me.ID): []string{}}, -1)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//fmt.Printf("\n\n%+v\n\n", resp)
+	//return
+
+	//err = cli.UpdateDevice(string(store.me.Device.ID), "go-olm-test")
+	//if err != nil {
+	//	panic(err)
+	//}
+
+	//err = store.me.KeysUpload()
+	//if err != nil {
+	//	panic(err)
+	//}
+	//return
 
 	joinedRooms, err := cli.JoinedRooms()
 	if err != nil {
@@ -1382,7 +1401,13 @@ func parseEvent(ev *mat.Event) (sender string, body string) {
 				errMsg = err.Error()
 				break
 			}
-			body = msg
+			var decEv mat.Event
+			err = json.Unmarshal([]byte(msg), &decEv)
+			if err != nil {
+				errMsg = err.Error()
+				break
+			}
+			sender, body = parseEvent(&decEv)
 		}
 		if errMsg != "" {
 			body = fmt.Sprintf("ERROR: %s", errMsg)

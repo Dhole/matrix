@@ -15,20 +15,20 @@ import (
 	"time"
 )
 
-var userID = mat.UserID("@ray_test:matrix.org")
-var username = "ray_test"
-var homeserver = "https://matrix.org"
-var password = ""
-var deviceID = mat.DeviceID("5un3HpnWE")
-var deviceDisplayName = "go-olm-dev"
+var _userID = mat.UserID("@ray_test:matrix.org")
+var _username = "ray_test"
+var _homeserver = "https://matrix.org"
+var _password = ""
+var _deviceID = mat.DeviceID("5un3HpnWE")
+var _deviceDisplayName = "go-olm-dev"
 
-type EncryptionAlg string
-
-const (
-	EncryptionAlgNone   EncryptionAlg = ""
-	EncryptionAlgOlm    EncryptionAlg = "m.olm.v1.curve25519-aes-sha2"
-	EncryptionAlgMegolm EncryptionAlg = "m.megolm.v1.aes-sha2"
-)
+//type EncryptionAlg string
+//
+//const (
+//	EncryptionAlgNone   EncryptionAlg = ""
+//	EncryptionAlgOlm    EncryptionAlg = "m.olm.v1.curve25519-aes-sha2"
+//	EncryptionAlgMegolm EncryptionAlg = "m.megolm.v1.aes-sha2"
+//)
 
 //type RoomID string
 //type UserID string
@@ -162,18 +162,14 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 			}
 
 			oneTimeKey = OTK.Key
-			olmSession, err := store.me.Device.OlmAccount.NewOutboundSession(
+			session, err := store.me.Device.OlmAccount.NewOutboundSession(
 				d.Curve25519, oneTimeKey)
 			if err != nil {
 				return nil, err
 			}
-			store.sessionsID.setOlmSessionID(roomID, userID, d.Curve25519,
-				olm.SessionID(olmSession.ID()))
-			store.db.StoreOlmSessioID(roomID, userID, d.Curve25519, olm.SessionID(olmSession.ID()))
-			d.OlmSessions[olm.SessionID(olmSession.ID())] = olmSession
-			store.db.StoreOlmSession(userID, d.ID, olmSession)
+			StoreNewOlmSession(roomID, userID, d, session)
 
-			return olmSession, nil
+			return session, nil
 		}
 	}
 
@@ -369,7 +365,7 @@ type Room struct {
 	name  string
 	Users map[mat.UserID]*User
 	// TODO: encryption type
-	encryptionAlg EncryptionAlg
+	encryptionAlg olm.Algorithm
 	//MegolmOutSession *olm.OutboundGroupSession
 }
 
@@ -380,20 +376,20 @@ func NewRoom(roomID mat.RoomID) *Room {
 	}
 }
 
-func (r *Room) EncryptionAlg() EncryptionAlg {
+func (r *Room) EncryptionAlg() olm.Algorithm {
 	return r.encryptionAlg
 }
 
 func (r *Room) SetOlmEncryption() error {
-	return r.SetEncryption(EncryptionAlgOlm)
+	return r.SetEncryption(olm.AlgorithmOlmV1)
 }
 
 func (r *Room) SetMegolmEncryption() error {
-	return r.SetEncryption(EncryptionAlgMegolm)
+	return r.SetEncryption(olm.AlgorithmMegolmV1)
 }
 
-func (r *Room) SetEncryption(encryptionAlg EncryptionAlg) error {
-	if r.encryptionAlg == EncryptionAlgNone {
+func (r *Room) SetEncryption(encryptionAlg olm.Algorithm) error {
+	if r.encryptionAlg == olm.AlgorithmNone {
 		_, err := cli.SendStateEvent(string(r.id), "m.room.encryption", "",
 			map[string]string{"algorithm": string(encryptionAlg)})
 		if err == nil {
@@ -413,11 +409,11 @@ func (r *Room) SendText(text string) error {
 
 func (r *Room) SendMsg(eventType string, contentJSON interface{}) error {
 	switch r.encryptionAlg {
-	case EncryptionAlgNone:
+	case olm.AlgorithmNone:
 		return r.sendPlaintextMsg(eventType, contentJSON)
-	case EncryptionAlgOlm:
+	case olm.AlgorithmOlmV1:
 		return r.sendOlmMsg(eventType, contentJSON)
-	case EncryptionAlgMegolm:
+	case olm.AlgorithmMegolmV1:
 		return r.sendMegolmMsg(eventType, contentJSON)
 	}
 	return nil
@@ -472,7 +468,7 @@ func (r *Room) sendOlmMsg(eventType string, contentJSON interface{}) SendEncEven
 		}
 	}
 	contentJSONEnc := map[string]interface{}{
-		"algorithm":  "m.olm.v1.curve25519-aes-sha2",
+		"algorithm":  olm.AlgorithmOlmV1,
 		"ciphertext": ciphertext,
 		"sender_key": store.me.Device.Curve25519}
 	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
@@ -521,6 +517,19 @@ func GetUserDevices(userID mat.UserID) (*UserDevices, error) {
 		}
 		return userDevices, nil
 	}
+}
+
+func GetUserDevice(userID mat.UserID, deviceKey olm.Curve25519) (*Device, error) {
+	userDevices, err := GetUserDevices(userID)
+	if err != nil {
+		return nil, err
+	}
+	device := userDevices.Devices[deviceKey]
+	if device == nil {
+		return nil, fmt.Errorf("Device with key %s for user %s not available",
+			deviceKey, userID)
+	}
+	return device, nil
 }
 
 // RoomsSessionsID maps (RoomID, UserID, Curve25519) to (olmSessionID, megolmInSessionID)
@@ -574,10 +583,21 @@ func (rs *RoomsSessionsID) GetOlmSessionID(roomID mat.RoomID, userID mat.UserID,
 	}
 }
 
+//func (rs *RoomsSessionsID) GetOlmSession(roomID mat.RoomID, userID mat.UserID, key olm.Curve25519) *olm.Session {
+//
+//}
+
 func (rs *RoomsSessionsID) setOlmSessionID(roomID mat.RoomID, userID mat.UserID,
 	key olm.Curve25519, sessionID olm.SessionID) {
 	sessionsID := rs.makeSessionsID(roomID, userID, key)
 	sessionsID.olmSessionID = sessionID
+}
+
+func StoreNewOlmSession(roomID mat.RoomID, userID mat.UserID, device *Device, session *olm.Session) {
+	store.sessionsID.setOlmSessionID(roomID, userID, device.Curve25519, session.ID())
+	store.db.StoreOlmSessioID(roomID, userID, device.Curve25519, session.ID())
+	device.OlmSessions[session.ID()] = session
+	store.db.StoreOlmSession(userID, device.ID, session)
 }
 
 func (rs *RoomsSessionsID) setMegolmSessionID(roomID mat.RoomID, userID mat.UserID,
@@ -1061,7 +1081,7 @@ func (cdb *CryptoDB) LoadMapSessionsID() (*RoomsSessionsID, error) {
 
 func roomFromBucket(roomID mat.RoomID, roomBucket *bolt.Bucket) *Room {
 	room := NewRoom(roomID)
-	room.encryptionAlg = EncryptionAlg(roomBucket.Get([]byte("encryption_alg")))
+	room.encryptionAlg = olm.Algorithm(roomBucket.Get([]byte("encryption_alg")))
 	return room
 }
 
@@ -1080,7 +1100,7 @@ func (cdb *CryptoDB) LoadRooms() (map[mat.RoomID]*Room, error) {
 	return rooms, err
 }
 
-func (cdb *CryptoDB) StoreRoomEncryptionAlg(roomID mat.RoomID, encryptionAlg EncryptionAlg) error {
+func (cdb *CryptoDB) StoreRoomEncryptionAlg(roomID mat.RoomID, encryptionAlg olm.Algorithm) error {
 	err := cdb.db.View(func(tx *bolt.Tx) error {
 		cryptoRoomsBucket := tx.Bucket([]byte("crypto_rooms"))
 		roomBucket, err := cryptoRoomsBucket.CreateBucketIfNotExists([]byte(roomID))
@@ -1102,25 +1122,25 @@ func SplitAlgorithmKeyID(algorithmKeyID string) (string, string) {
 }
 
 func main() {
-	password = os.Args[1]
+	_password = os.Args[1]
 
 	var err error
-	store, err = LoadStore(userID, deviceID, "test.db")
+	store, err = LoadStore(_userID, _deviceID, "test.db")
 	if err != nil {
 		store.Close()
 		log.Fatal(err)
 	}
 	defer store.Close()
 
-	cli, _ = mat.NewClient(homeserver, "", "")
+	cli, _ = mat.NewClient(_homeserver, "", "")
 	cli.Prefix = "/_matrix/client/unstable"
 	fmt.Println("Logging in...")
 	resLogin, err := cli.Login(&mat.ReqLogin{
 		Type:                     "m.login.password",
-		User:                     username,
-		Password:                 password,
-		DeviceID:                 string(deviceID),
-		InitialDeviceDisplayName: deviceDisplayName,
+		User:                     _username,
+		Password:                 _password,
+		DeviceID:                 string(_deviceID),
+		InitialDeviceDisplayName: _deviceDisplayName,
 	})
 	if err != nil {
 		panic(err)
@@ -1165,7 +1185,7 @@ func main() {
 		roomID := mat.RoomID(joinedRooms.JoinedRooms[i])
 		if store.rooms[roomID] == nil {
 			room := NewRoom(roomID)
-			room.encryptionAlg = EncryptionAlgNone
+			room.encryptionAlg = olm.AlgorithmNone
 			store.rooms[roomID] = room
 		}
 		room := store.rooms[roomID]
@@ -1308,7 +1328,7 @@ func main() {
 	//	}
 	//}
 
-	if room.EncryptionAlg() != EncryptionAlgOlm {
+	if room.EncryptionAlg() != olm.AlgorithmOlmV1 {
 		err = room.SetOlmEncryption()
 		if err != nil {
 			panic(err)
@@ -1373,72 +1393,60 @@ type MegolmMsg struct {
 }
 
 func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
-
-	//fromMe := false
 	if olmMsg.SenderKey == store.me.Device.Curve25519 {
-		//fromMe = true
+		// TODO: Cache self encrypted olm messages so that they can be queried here
 		return "", fmt.Errorf("Olm encrypted messages by myself not cached yet")
 	}
-	userDevices, err := GetUserDevices(sender)
+	// NOTE: olm messages can be decrypted without the sender keys
+	device, err := GetUserDevice(sender, olmMsg.SenderKey)
 	if err != nil {
 		return "", err
-	}
-	//userDevices := store.users[sender]
-	//if userDevices == nil {
-	//	return "", fmt.Errorf("User %s not stored", sender)
-	//}
-	device := userDevices.Devices[olmMsg.SenderKey]
-	if device == nil {
-		return "", fmt.Errorf("Device with key %s for user %s not available",
-			olmMsg.SenderKey, sender)
 	}
 	ciphertext, ok := olmMsg.Ciphertext[store.me.Device.Curve25519]
 	if !ok {
 		return "", fmt.Errorf("Message not encrypted for our Curve25519 key %s",
 			store.me.Device.Curve25519)
 	}
-	var olmSession *olm.Session
+	var session *olm.Session
 	sessionsID := store.sessionsID.getSessionsID(roomID, sender, olmMsg.SenderKey)
 	if sessionsID == nil {
+		// Is this a pre key message where the sender has started an olm session?
 		if ciphertext.Type == olm.MsgTypePreKey {
-			olmSession, err = store.me.Device.OlmAccount.NewInboundSession(ciphertext.Body)
+			session, err = store.me.Device.OlmAccount.
+				NewInboundSession(ciphertext.Body)
 			if err != nil {
 				return "", err
 			}
-			// TODO: Put this into a function AAA New Olm Session
-			store.sessionsID.setOlmSessionID(roomID, sender, olmMsg.SenderKey, olmSession.ID())
-			store.db.StoreOlmSessioID(roomID, userID, device.Curve25519, olm.SessionID(olmSession.ID()))
-			device.OlmSessions[olm.SessionID(olmSession.ID())] = olmSession
-			store.db.StoreOlmSession(userID, device.ID, olmSession)
+			StoreNewOlmSession(roomID, sender, device, session)
+
 		} else {
-			return "", fmt.Errorf("No olm session stored for room %s, user %s, device key %s",
-				roomID, sender, olmMsg.SenderKey)
+			return "", fmt.Errorf("No olm session stored for "+
+				"room %s, user %s, device key %s", roomID, sender, olmMsg.SenderKey)
 		}
 	} else {
-		olmSession = device.OlmSessions[sessionsID.olmSessionID]
+		session = device.OlmSessions[sessionsID.olmSessionID]
 	}
-	msg, err := olmSession.Decrypt(ciphertext.Body, ciphertext.Type)
+	msg, err := session.Decrypt(ciphertext.Body, ciphertext.Type)
 	if err != nil {
+		// Is this a pre key message where the sender has started a new olm session?
 		if ciphertext.Type == olm.MsgTypePreKey {
-			olmSession, err2 := store.me.Device.OlmAccount.NewInboundSession(ciphertext.Body)
+			session2, err2 := store.me.Device.OlmAccount.
+				NewInboundSession(ciphertext.Body)
 			if err2 != nil {
 				return "", err
 			}
-			msg, err2 = olmSession.Decrypt(ciphertext.Body, ciphertext.Type)
+			msg, err2 = session2.Decrypt(ciphertext.Body, ciphertext.Type)
 			if err2 != nil {
 				return "", err
 			}
-
-			// TODO: Put this into a function AAA New Olm Session
-			store.sessionsID.setOlmSessionID(roomID, sender, olmMsg.SenderKey, olmSession.ID())
-			store.db.StoreOlmSessioID(roomID, userID, device.Curve25519, olm.SessionID(olmSession.ID()))
-			device.OlmSessions[olm.SessionID(olmSession.ID())] = olmSession
-			store.db.StoreOlmSession(userID, device.ID, olmSession)
+			session = session2
+			StoreNewOlmSession(roomID, sender, device, session)
+			return msg, nil
 		} else {
 			return "", err
 		}
 	}
-	store.db.StoreOlmSession(sender, device.ID, olmSession)
+	store.db.StoreOlmSession(sender, device.ID, session)
 	return msg, nil
 }
 
@@ -1459,7 +1467,7 @@ func parseEvent(ev *mat.Event) (sender string, body string) {
 		var decEvent mat.Event
 		var err error
 		switch ev.Content["algorithm"] {
-		case "m.olm.v1.curve25519-aes-sha2":
+		case string(olm.AlgorithmOlmV1):
 			var olmMsg OlmMsg
 			err = mapstructure.Decode(ev.Content, &olmMsg)
 			if err != nil {

@@ -17,8 +17,8 @@ var _userID = mat.UserID("@ray_test:matrix.org")
 var _username = "ray_test"
 var _homeserver = "https://matrix.org"
 var _password = ""
-var _deviceID = mat.DeviceID("5un3HpnWE01")
-var _deviceDisplayName = "go-olm-dev01"
+var _deviceID = mat.DeviceID("5un3HpnWE04")
+var _deviceDisplayName = "go-olm-dev02"
 
 //type EncryptionAlg string
 //
@@ -103,21 +103,23 @@ func (store *Store) Close() {
 // errors to decide wether to retry or not!
 
 type Device struct {
+	user       *UserDevices
 	ID         mat.DeviceID
 	Ed25519    olm.Ed25519    // SigningKey
 	Curve25519 olm.Curve25519 // IdentityKey
 	//OneTimeKey       string                              // IdentityKey
-	OlmSessions      map[olm.SessionID]*olm.Session
-	MegolmInSessions map[olm.SessionID]*olm.InboundGroupSession
+	OlmSessions        map[olm.SessionID]*olm.Session
+	MegolmInSessions   map[olm.SessionID]*olm.InboundGroupSession
+	sharedMegolmOutKey map[olm.SessionID]bool
 }
 
-func NewDevice(deviceID mat.DeviceID) *Device {
-	return &Device{
-		ID:               mat.DeviceID(deviceID),
-		OlmSessions:      make(map[olm.SessionID]*olm.Session),
-		MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
-	}
-}
+//func NewDevice(deviceID mat.DeviceID) *Device {
+//	return &Device{
+//		ID:               mat.DeviceID(deviceID),
+//		OlmSessions:      make(map[olm.SessionID]*olm.Session),
+//		MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
+//	}
+//}
 
 func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Session, error) {
 	deviceKeysAlgorithms := map[string]map[string]string{
@@ -268,6 +270,26 @@ func (d *Device) SendMegolmOutKey(roomID mat.RoomID, userID mat.UserID,
 	return nil
 }
 
+func SharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
+	sessionID olm.SessionID) bool {
+	device, err := GetUserDevice(userID, deviceKey)
+	if err != nil {
+		return false
+	}
+	return device.sharedMegolmOutKey[sessionID]
+}
+
+func SetSharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
+	sessionID olm.SessionID) error {
+	device, err := GetUserDevice(userID, deviceKey)
+	if err != nil {
+		return err
+	}
+	device.sharedMegolmOutKey[sessionID] = true
+	store.db.SetSharedMegolmOutKey(userID, device.ID, sessionID)
+	return nil
+}
+
 type MyDevice struct {
 	ID         mat.DeviceID
 	Ed25519    olm.Ed25519    // Ed25519
@@ -301,9 +323,10 @@ func (ud *UserDevices) Update() error {
 		return err
 	}
 	//fmt.Printf("%+v\n", respQuery)
-	// TODO: Verify signatures, and note who has signed the key
+	// TODO: Verify signatures, and save who has signed the key
 	for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[string(ud.ID)] {
-		device := NewDevice(mat.DeviceID(theirDeviceID))
+		var ed25519 olm.Ed25519
+		var curve25519 olm.Curve25519
 		for algorithmKeyID, key := range deviceKeys.Keys {
 			algorithm, theirDeviceID2 := SplitAlgorithmKeyID(algorithmKeyID)
 			if theirDeviceID != theirDeviceID2 {
@@ -311,21 +334,42 @@ func (ud *UserDevices) Update() error {
 			}
 			switch algorithm {
 			case "ed25519":
-				device.Ed25519 = olm.Ed25519(key)
+				ed25519 = olm.Ed25519(key)
 			case "curve25519":
-				device.Curve25519 = olm.Curve25519(key)
+				curve25519 = olm.Curve25519(key)
 			}
 		}
-		if device.Ed25519 == "" || device.Curve25519 == "" {
+		if ed25519 == "" || curve25519 == "" {
 			// TODO: Handle this case properly
 			continue
 		}
-		store.db.AddUserDevice(ud.ID, mat.DeviceID(theirDeviceID))
-		store.db.StorePubKeys(ud.ID, device.ID, device.Ed25519, device.Curve25519)
-		ud.Devices[device.Curve25519] = device
-		ud.DevicesByID[device.ID] = device
+		ud.NewUpdateDevice(mat.DeviceID(theirDeviceID), ed25519, curve25519)
 	}
 	return nil
+}
+
+// NOTE: Call this after the device keys have been verified to be signed by the
+// ed25519 key of the device!
+func (ud *UserDevices) NewUpdateDevice(deviceID mat.DeviceID,
+	ed25519 olm.Ed25519, curve25519 olm.Curve25519) *Device {
+	// TODO!!!
+	// We pick the device by curve25519 because
+	device := ud.Devices[curve25519]
+	if device == nil {
+		device = &Device{
+			user:             ud,
+			ID:               mat.DeviceID(deviceID),
+			Ed25519:          ed25519,
+			Curve25519:       curve25519,
+			OlmSessions:      make(map[olm.SessionID]*olm.Session),
+			MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
+		}
+		ud.Devices[device.Curve25519] = device
+		ud.DevicesByID[device.ID] = device
+		store.db.AddUserDevice(ud.ID, device.ID)
+		store.db.StorePubKeys(ud.ID, device.ID, device.Ed25519, device.Curve25519)
+	}
+	return device
 }
 
 type MyUserDevice struct {
@@ -333,6 +377,8 @@ type MyUserDevice struct {
 	Device *MyDevice
 }
 
+// TODO: Track how many unused keys are in the server, and find a mechanism to
+// update them if necessary
 func (me *MyUserDevice) KeysUpload() error {
 	olmAccount := me.Device.OlmAccount
 	deviceKeys := mat.DeviceKeys{
@@ -543,7 +589,13 @@ func (r *Room) sendMegolmMsg(eventType string, contentJSON interface{}) SendEncE
 			continue
 		}
 		for _, device := range userDevices.Devices {
-			device.SendMegolmOutKey(r.id, user.id, session)
+			if SharedMegolmOutKey(user.id, device.Curve25519, session.ID()) {
+				continue
+			}
+			err := device.SendMegolmOutKey(r.id, user.id, session)
+			if err != nil {
+				SetSharedMegolmOutKey(user.id, device.Curve25519, session.ID())
+			}
 		}
 	}
 	contentJSONEnc := map[string]interface{}{
@@ -819,12 +871,14 @@ func main() {
 	var theirUser User
 	// TMP
 	//fmt.Scanln(&input)
+	fmt.Println()
 	roomIdx, err := strconv.Atoi(input)
 	if err != nil {
 		fmt.Println("Creating new room...")
 		fmt.Printf("Write user ID to invite: ")
 		// TMP
 		//fmt.Scanln(&input)
+		fmt.Println()
 		input = "@dhole:matrix.org"
 		if input != "" {
 			theirUser.id = mat.UserID(input)
@@ -931,7 +985,6 @@ func main() {
 	}
 
 	text := fmt.Sprint("I'm encrypted :D ~ ", time.Now().Format("2006-01-02 15:04:05"))
-	err = room.SendText(text)
 	err = room.SendText(text)
 	err = room.SendText(text)
 	if err != nil {
@@ -1087,7 +1140,7 @@ func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID
 		// get the session key immediately, figure out a way to notify
 		// the client that the messages can now be decrypted upong
 		// receiving such key
-		return "", fmt.Errorf("User %s with device key %s hasn't sent us the megolm"+
+		return "", fmt.Errorf("User %s with device key %s hasn't sent us the megolm "+
 			"session key", sender, megolmMsg.SenderKey)
 	}
 	session = device.MegolmInSessions[megolmMsg.SessionID]
@@ -1228,6 +1281,9 @@ func parseRoomKey(roomID mat.RoomID, userID mat.UserID,
 		if err != nil {
 			break
 		}
+		body = fmt.Sprintf("Received megolm session key for "+
+			"room %s, user %s, device %s, session %s",
+			roomID, userID, device.ID, roomKey.SessionID)
 		store.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
 			senderKey, roomKey.SessionID)
 		store.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519, session.ID())

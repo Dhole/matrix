@@ -33,66 +33,88 @@ var _deviceDisplayName = "go-olm-dev02"
 //type SessionID string
 //type DeviceID string
 
-var store *Store
+var container *Container
 
 var cli *mat.Client
 
-// Store contains data structures that are completely or partly permanent
+// Container contains data structures that are completely or partly permanent
 // (backed by a data base).
-type Store struct {
+type Container struct {
 	me         *MyUserDevice
 	users      map[mat.UserID]*UserDevices
 	sessionsID *RoomsSessionsID
 	rooms      map[mat.RoomID]*Room
-	db         Storer
+	db         Databaser
 }
 
-// LoadStore loads the Store datastructure.  It sets up the database and loads
+func (c *Container) Room(roomID mat.RoomID) *Room {
+	return c.rooms[roomID]
+}
+
+func (c *Container) ForEachUser(fn func(uID mat.UserID, ud *UserDevices) error) (err error) {
+	for userID, userDevices := range c.users {
+		if err = fn(userID, userDevices); err != nil {
+			break
+		}
+	}
+	return err
+}
+
+func (c *Container) ForEachRoom(fn func(rID mat.RoomID, r *Room) error) (err error) {
+	for roomID, room := range c.rooms {
+		if err = fn(roomID, room); err != nil {
+			break
+		}
+	}
+	return err
+}
+
+// LoadContainer loads the Container datastructure.  It sets up the database and loads
 // its contents into the rest of the datastructure.
-func LoadStore(userID mat.UserID, deviceID mat.DeviceID, db Storer) (*Store, error) {
-	var store Store
-	store.db = db
+func LoadContainer(userID mat.UserID, deviceID mat.DeviceID, db Databaser) (*Container, error) {
+	var container Container
+	container.db = db
 
 	// Load/Create myUser olm data
-	store.db.AddMyUserMyDevice(userID, deviceID)
-	if !store.db.ExistsOlmAccount(userID, deviceID) {
+	container.db.AddMyUserMyDevice(userID, deviceID)
+	if !container.db.ExistsOlmAccount(userID, deviceID) {
 		olmAccount := olm.NewAccount()
-		store.db.StoreOlmAccount(userID, deviceID,
+		container.db.StoreOlmAccount(userID, deviceID,
 			olmAccount)
 		// TODO: Upload device identity keys to server using `/keys/upload`
 		// TODO: Upload device one-time keys to server using `/keys/upload`
 	}
 	var err error
-	store.me, err = store.db.LoadMyUserDevice(userID)
+	container.me, err = container.db.LoadMyUserDevice(userID)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("Identity keys:", store.me.Device.Ed25519, store.me.Device.Curve25519)
+	fmt.Println("Identity keys:", container.me.Device.Ed25519, container.me.Device.Curve25519)
 
 	// Load stored user devices olm data (userID, deviceID, keys, olm sessions, ...)
-	store.users, err = store.db.LoadAllUserDevices()
+	container.users, err = container.db.LoadAllUserDevices()
 	if err != nil {
 		return nil, err
 	}
 
 	// Load stored rooms olm data (encryption Algorithm, ...)
-	store.rooms, err = store.db.LoadRooms()
+	container.rooms, err = container.db.LoadRooms()
 	if err != nil {
 		return nil, err
 	}
 
 	// Load map of olm sessionID by (roomID, userID, deviceID)
-	store.sessionsID, err = store.db.LoadMapSessionsID()
+	container.sessionsID, err = container.db.LoadMapSessionsID()
 	if err != nil {
 		return nil, err
 	}
 
-	return &store, nil
+	return &container, nil
 }
 
-func (store *Store) Close() {
-	if store.db != nil {
-		store.db.Close()
+func (c *Container) Close() {
+	if c.db != nil {
+		c.db.Close()
 	}
 }
 
@@ -121,9 +143,9 @@ type Device struct {
 //	}
 //}
 
-func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Session, error) {
+func (d *Device) NewOlmSession(roomID mat.RoomID) (*olm.Session, error) {
 	deviceKeysAlgorithms := map[string]map[string]string{
-		string(userID): map[string]string{string(d.ID): "signed_curve25519"},
+		string(d.user.id): map[string]string{string(d.ID): "signed_curve25519"},
 	}
 	fmt.Printf("Query: %+v\n", deviceKeysAlgorithms)
 	respClaim, err := cli.KeysClaim(deviceKeysAlgorithms, -1)
@@ -133,10 +155,10 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 	fmt.Printf("Response: %+v\n", respClaim)
 
 	var oneTimeKey olm.Curve25519
-	// TODO: Check each key individually to verify that the first one
+	// TODO: Check each map key individually to verify that the first one
 	// exists before getting the second one and avoid the possibility of
 	// getting a key from a nil map.
-	algorithmKey, ok := respClaim.OneTimeKeys[string(userID)][string(d.ID)]
+	algorithmKey, ok := respClaim.OneTimeKeys[string(d.user.id)][string(d.ID)]
 	if !ok {
 		// TODO: This error is final, should we mark the device as
 		// unusable?  How do we know when new keys are uploaded?
@@ -156,12 +178,12 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 			}
 
 			oneTimeKey = OTK.Key
-			session, err := store.me.Device.OlmAccount.NewOutboundSession(
+			session, err := container.me.Device.OlmAccount.NewOutboundSession(
 				d.Curve25519, oneTimeKey)
 			if err != nil {
 				return nil, err
 			}
-			StoreNewOlmSession(roomID, userID, d, session)
+			StoreNewOlmSession(roomID, d.user.id, d, session)
 
 			return session, nil
 		}
@@ -172,7 +194,7 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 
 // func (d *Device) EncryptOlmMsg(roomID RoomID, userID UserID, eventType string,
 // 	contentJSON interface{}) (interface{}, error) {
-// 	olmSession, ok := d.OlmSessions[store.sessionsID.GetOlmSessionID(roomID, userID, d.Curve25519)]
+// 	olmSession, ok := d.OlmSessions[container.sessionsID.GetOlmSessionID(roomID, userID, d.Curve25519)]
 // 	if !ok {
 // 		var err error
 // 		olmSession, err = d.NewOlmSession(roomID, userID)
@@ -184,7 +206,7 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 // 		"type":           eventType,
 // 		"content":        contentJSON,
 // 		"recipient":      userID,
-// 		"sender":         store.me.ID,
+// 		"sender":         container.me.ID,
 // 		"recipient_keys": map[string]string{"ed25519": d.Ed25519},
 // 		"room_id":        roomID}
 // 	payloadJSON, err := json.Marshal(payload)
@@ -193,7 +215,7 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 // 	}
 // 	fmt.Println(string(payloadJSON))
 // 	encryptMsgType, encryptedMsg := olmSession.Encrypt(string(payloadJSON))
-// 	store.db.StoreOlmSession(userID, d.ID, olmSession)
+// 	container.db.StoreOlmSession(userID, d.ID, olmSession)
 //
 // 	return map[string]interface{}{
 // 		"algorithm": "m.olm.v1.curve25519-aes-sha2",
@@ -203,18 +225,18 @@ func (d *Device) NewOlmSession(roomID mat.RoomID, userID mat.UserID) (*olm.Sessi
 // 				"body": encryptedMsg,
 // 			},
 // 		},
-// 		//"device_id":  store.me.ID,
-// 		"sender_key": store.me.Device.Curve25519,
+// 		//"device_id":  container.me.ID,
+// 		"sender_key": container.me.Device.Curve25519,
 // 		"session_id": olmSession.ID()}, nil
 // }
 
-func (d *Device) EncryptOlmMsg(roomID mat.RoomID, userID mat.UserID, eventType string,
+func (d *Device) EncryptOlmMsg(roomID mat.RoomID, eventType string,
 	contentJSON interface{}) (olm.MsgType, string, error) {
-	session, ok := d.OlmSessions[store.sessionsID.GetOlmSessionID(roomID,
-		userID, d.Curve25519)]
+	session, ok := d.OlmSessions[container.sessionsID.GetOlmSessionID(roomID,
+		d.user.id, d.Curve25519)]
 	if !ok {
 		var err error
-		session, err = d.NewOlmSession(roomID, userID)
+		session, err = d.NewOlmSession(roomID)
 		if err != nil {
 			return 0, "", err
 		}
@@ -222,8 +244,8 @@ func (d *Device) EncryptOlmMsg(roomID mat.RoomID, userID mat.UserID, eventType s
 	payload := map[string]interface{}{
 		"type":           eventType,
 		"content":        contentJSON,
-		"recipient":      userID,
-		"sender":         store.me.ID,
+		"recipient":      d.user.id,
+		"sender":         container.me.ID,
 		"recipient_keys": map[string]olm.Ed25519{"ed25519": d.Ed25519},
 		"room_id":        roomID}
 	if strings.HasPrefix(string(roomID), "_SendToDevice") {
@@ -235,7 +257,7 @@ func (d *Device) EncryptOlmMsg(roomID mat.RoomID, userID mat.UserID, eventType s
 	}
 	//fmt.Println(string(payloadJSON))
 	encryptMsgType, encryptedMsg := session.Encrypt(string(payloadJSON))
-	store.db.StoreOlmSession(userID, d.ID, session)
+	container.db.StoreOlmSession(d.user.id, d.ID, session)
 
 	return encryptMsgType, encryptedMsg, nil
 }
@@ -244,10 +266,10 @@ func SendToDeviceRoomID(key olm.Curve25519) mat.RoomID {
 	return mat.RoomID(fmt.Sprintf("_SendToDevice_%s", key))
 }
 
-func (d *Device) SendMegolmOutKey(roomID mat.RoomID, userID mat.UserID,
+func (d *Device) SendMegolmOutKey(roomID mat.RoomID,
 	session *olm.OutboundGroupSession) error {
 	_roomID := SendToDeviceRoomID(d.Curve25519)
-	msgType, msg, err := d.EncryptOlmMsg(_roomID, userID, "m.room_key",
+	msgType, msg, err := d.EncryptOlmMsg(_roomID, "m.room_key",
 		RoomKey{Algorithm: olm.AlgorithmMegolmV1, RoomID: roomID,
 			SessionID: session.ID(), SessionKey: session.SessionKey()})
 	if err != nil {
@@ -258,16 +280,25 @@ func (d *Device) SendMegolmOutKey(roomID mat.RoomID, userID mat.UserID,
 	contentJSONEnc := map[string]interface{}{
 		"algorithm":  olm.AlgorithmOlmV1,
 		"ciphertext": ciphertext,
-		"sender_key": store.me.Device.Curve25519}
-	log.Println("Sending MegolmOut Key to", userID, d.ID, "for room", roomID, "from", store.me.ID, store.me.Device.ID, "sender_key", store.me.Device.Curve25519, "session_id", session.ID())
+		"sender_key": container.me.Device.Curve25519}
+	log.Println("Sending MegolmOut Key to", d.user.id, d.ID, "for room", roomID, "from", container.me.ID, container.me.Device.ID, "sender_key", container.me.Device.Curve25519, "session_id", session.ID())
 	log.Println("SessionKey: ", session.SessionKey())
 	err = cli.SendToDevice("m.room.encrypted", &mat.SendToDeviceMessages{
 		Messages: map[string]map[string]interface{}{
-			string(userID): map[string]interface{}{string(d.ID): contentJSONEnc}}})
+			string(d.user.id): map[string]interface{}{string(d.ID): contentJSONEnc}}})
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+func (d *Device) SharedMegolmOutKey(sessionID olm.SessionID) bool {
+	return d.sharedMegolmOutKey[sessionID]
+}
+
+func (d *Device) SetSharedMegolmOutKey(sessionID olm.SessionID) {
+	d.sharedMegolmOutKey[sessionID] = true
+	container.db.SetSharedMegolmOutKey(d.user.id, d.ID, sessionID)
 }
 
 func SharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
@@ -286,7 +317,7 @@ func SetSharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
 		return err
 	}
 	device.sharedMegolmOutKey[sessionID] = true
-	store.db.SetSharedMegolmOutKey(userID, device.ID, sessionID)
+	container.db.SetSharedMegolmOutKey(userID, device.ID, sessionID)
 	return nil
 }
 
@@ -300,7 +331,7 @@ type MyDevice struct {
 }
 
 type UserDevices struct {
-	ID                mat.UserID
+	id                mat.UserID
 	Devices           map[olm.Curve25519]*Device
 	DevicesByID       map[mat.DeviceID]*Device
 	devicesTracking   bool
@@ -310,21 +341,34 @@ type UserDevices struct {
 
 func NewUserDevices(userID mat.UserID) *UserDevices {
 	return &UserDevices{
-		ID:          userID,
+		id:          userID,
 		Devices:     make(map[olm.Curve25519]*Device),
 		DevicesByID: make(map[mat.DeviceID]*Device),
 	}
 }
 
+func (ud *UserDevices) ID() mat.UserID {
+	return ud.id
+}
+
+func (ud *UserDevices) ForEach(fn func(k olm.Curve25519, d *Device) error) (err error) {
+	for key, device := range ud.Devices {
+		if err = fn(key, device); err != nil {
+			break
+		}
+	}
+	return err
+}
+
 func (ud *UserDevices) Update() error {
-	log.Println("Updating list of user", ud.ID, "devices")
-	respQuery, err := cli.KeysQuery(map[string][]string{string(ud.ID): []string{}}, -1)
+	log.Println("Updating list of user", ud.id, "devices")
+	respQuery, err := cli.KeysQuery(map[string][]string{string(ud.id): []string{}}, -1)
 	if err != nil {
 		return err
 	}
 	//fmt.Printf("%+v\n", respQuery)
 	// TODO: Verify signatures, and save who has signed the key
-	for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[string(ud.ID)] {
+	for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[string(ud.id)] {
 		var ed25519 olm.Ed25519
 		var curve25519 olm.Curve25519
 		for algorithmKeyID, key := range deviceKeys.Keys {
@@ -366,8 +410,8 @@ func (ud *UserDevices) NewUpdateDevice(deviceID mat.DeviceID,
 		}
 		ud.Devices[device.Curve25519] = device
 		ud.DevicesByID[device.ID] = device
-		store.db.AddUserDevice(ud.ID, device.ID)
-		store.db.StorePubKeys(ud.ID, device.ID, device.Ed25519, device.Curve25519)
+		container.db.AddUserDevice(ud.id, device.ID)
+		container.db.StorePubKeys(ud.id, device.ID, device.Ed25519, device.Curve25519)
 	}
 	return device
 }
@@ -401,7 +445,7 @@ func (me *MyUserDevice) KeysUpload() error {
 		return err
 	}
 	olmAccount.GenOneTimeKeys(4)
-	store.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
+	container.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
 	otks := olmAccount.OneTimeKeys()
 	oneTimeKeys := make(map[string]mat.OneTimeKey)
 	for keyID, key := range otks.Curve25519 {
@@ -423,7 +467,7 @@ func (me *MyUserDevice) KeysUpload() error {
 	}
 	fmt.Printf("\n%+v\n", res)
 	olmAccount.MarkKeysAsPublished()
-	store.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
+	container.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
 	return nil
 }
 
@@ -433,10 +477,9 @@ type SessionsID struct {
 }
 
 type Room struct {
-	id    mat.RoomID
-	name  string
-	Users map[mat.UserID]*User
-	// TODO: encryption type
+	id            mat.RoomID
+	name          string
+	users         map[mat.UserID]*User
 	encryptionAlg olm.Algorithm
 	//MegolmOutSession *olm.OutboundGroupSession
 }
@@ -444,8 +487,12 @@ type Room struct {
 func NewRoom(roomID mat.RoomID) *Room {
 	return &Room{
 		id:    roomID,
-		Users: make(map[mat.UserID]*User),
+		users: make(map[mat.UserID]*User),
 	}
+}
+
+func (r *Room) ID() mat.RoomID {
+	return r.id
 }
 
 func (r *Room) EncryptionAlg() olm.Algorithm {
@@ -466,7 +513,7 @@ func (r *Room) SetEncryption(encryptionAlg olm.Algorithm) error {
 			map[string]string{"algorithm": string(encryptionAlg)})
 		if err == nil {
 			r.encryptionAlg = encryptionAlg
-			store.db.StoreRoomEncryptionAlg(r.id, encryptionAlg)
+			container.db.StoreRoomEncryptionAlg(r.id, encryptionAlg)
 		}
 		return err
 	} else {
@@ -489,6 +536,15 @@ func (r *Room) SendMsg(eventType string, contentJSON interface{}) error {
 		return r.sendMegolmMsg(eventType, contentJSON)
 	}
 	return nil
+}
+
+func (r *Room) ForEachUser(fn func(uID mat.UserID, u *User) error) (err error) {
+	for userID, user := range r.users {
+		if err = fn(userID, user); err != nil {
+			break
+		}
+	}
+	return err
 }
 
 type SendEncEventError struct {
@@ -515,26 +571,26 @@ func (errs SendEncEventErrors) Error() string {
 }
 
 func (r *Room) EncryptMegolmMsg(eventType string, contentJSON interface{}) string {
-	session, ok := store.me.Device.MegolmOutSessions[r.id]
+	session, ok := container.me.Device.MegolmOutSessions[r.id]
 	if !ok {
 		// TODO: Should we store the initial SessionKey, so that we can
 		// decrypt past messages?  What does Riot do?
 		session = olm.NewOutboundGroupSession()
-		store.me.Device.MegolmOutSessions[r.id] = session
-		store.db.StoreMegolmOutSession(store.me.ID, store.me.Device.ID, session)
+		container.me.Device.MegolmOutSessions[r.id] = session
+		container.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
 	}
 	payload := map[string]interface{}{
 		"type":    eventType,
 		"content": contentJSON,
-		"sender":  store.me.ID, // TODO: Needed?
-		"room_id": r.id}        // TODO: Needed?
+		"sender":  container.me.ID, // TODO: Needed?
+		"room_id": r.id}            // TODO: Needed?
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		panic(err)
 	}
 	//fmt.Println(string(payloadJSON))
 	encryptedMsg := session.Encrypt(string(payloadJSON))
-	store.db.StoreMegolmOutSession(store.me.ID, store.me.Device.ID, session)
+	container.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
 
 	return encryptedMsg
 }
@@ -544,30 +600,32 @@ func (r *Room) EncryptMegolmMsg(eventType string, contentJSON interface{}) strin
 func (r *Room) sendOlmMsg(eventType string, contentJSON interface{}) SendEncEventErrors {
 	var errs SendEncEventErrors
 	ciphertext := make(map[olm.Curve25519]Ciphertext)
-	for _, user := range r.Users {
+	r.ForEachUser(func(_ mat.UserID, user *User) error {
 		userDevices, err := user.Devices()
 		if err != nil {
 			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
-			continue
+			return nil
 		}
 		// TODO: Batch oneTimeKey claims of all devices for a user into
 		// one API call.  For now, device.EncryptOlmMsg will call
 		// device.newOlmSession for each device without session, which
 		// will trigger a oneTimeKey call for each device.
-		for _, device := range userDevices.Devices {
-			msgType, body, err := device.EncryptOlmMsg(r.id, user.id, eventType, contentJSON)
+		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
+			msgType, body, err := device.EncryptOlmMsg(r.id, eventType, contentJSON)
 			if err != nil {
 				errs = append(errs, SendEncEventError{UserID: user.id,
 					DeviceID: device.ID, Err: err})
-				continue
+				return nil
 			}
 			ciphertext[device.Curve25519] = Ciphertext{Type: msgType, Body: body}
-		}
-	}
+			return nil
+		})
+		return nil
+	})
 	contentJSONEnc := map[string]interface{}{
 		"algorithm":  olm.AlgorithmOlmV1,
 		"ciphertext": ciphertext,
-		"sender_key": store.me.Device.Curve25519}
+		"sender_key": container.me.Device.Curve25519}
 	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
 	if err != nil {
 		errs = append(errs, SendEncEventError{Err: err})
@@ -581,29 +639,31 @@ func (r *Room) sendMegolmMsg(eventType string, contentJSON interface{}) SendEncE
 	// otherwise the SessionKey ratchet will have advanced and can't be
 	// used to decrypt the message.
 	ciphertext := r.EncryptMegolmMsg(eventType, contentJSON)
-	session, _ := store.me.Device.MegolmOutSessions[r.id]
-	for _, user := range r.Users {
+	session, _ := container.me.Device.MegolmOutSessions[r.id]
+	r.ForEachUser(func(_ mat.UserID, user *User) error {
 		userDevices, err := user.Devices()
 		if err != nil {
 			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
-			continue
+			return nil
 		}
-		for _, device := range userDevices.Devices {
-			if SharedMegolmOutKey(user.id, device.Curve25519, session.ID()) {
-				continue
+		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
+			if device.SharedMegolmOutKey(session.ID()) {
+				return nil
 			}
-			err := device.SendMegolmOutKey(r.id, user.id, session)
+			err := device.SendMegolmOutKey(r.id, session)
 			if err != nil {
-				SetSharedMegolmOutKey(user.id, device.Curve25519, session.ID())
+				device.SetSharedMegolmOutKey(session.ID())
 			}
-		}
-	}
+			return nil
+		})
+		return nil
+	})
 	contentJSONEnc := map[string]interface{}{
 		"algorithm":  olm.AlgorithmMegolmV1,
 		"ciphertext": ciphertext,
-		"sender_key": store.me.Device.Curve25519,
+		"sender_key": container.me.Device.Curve25519,
 		"session_id": session.ID(),
-		"device_id":  store.me.Device.ID}
+		"device_id":  container.me.Device.ID}
 	//log.Println("Join the room now...")
 	//time.Sleep(10 * time.Second)
 	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
@@ -621,26 +681,33 @@ func (r *Room) sendPlaintextMsg(eventType string, contentJSON interface{}) error
 }
 
 type User struct {
-	id   mat.UserID
-	name string
-	//devices *UserDevices
+	id      mat.UserID
+	name    string
+	devices *UserDevices
 }
 
 // Blocks when calling userDevices.Update()
 // TODO: Handle tracking and outdated devices
 func (u *User) Devices() (*UserDevices, error) {
-	return GetUserDevices(u.id)
+	if u.devices == nil {
+		devices, err := GetUserDevices(u.id)
+		if err != nil {
+			return nil, err
+		}
+		u.devices = devices
+	}
+	return u.devices, nil
 }
 
 func GetUserDevices(userID mat.UserID) (*UserDevices, error) {
-	userDevices, ok := store.users[userID]
+	userDevices, ok := container.users[userID]
 	if ok {
 		return userDevices, nil
 	} else {
 		var userDevices *UserDevices
 		userDevices = NewUserDevices(userID)
-		store.users[userDevices.ID] = userDevices
-		store.db.AddUser(userDevices.ID)
+		container.users[userDevices.id] = userDevices
+		container.db.AddUser(userDevices.id)
 
 		if err := userDevices.Update(); err != nil {
 			return nil, err
@@ -724,10 +791,10 @@ func (rs *RoomsSessionsID) setOlmSessionID(roomID mat.RoomID, userID mat.UserID,
 }
 
 func StoreNewOlmSession(roomID mat.RoomID, userID mat.UserID, device *Device, session *olm.Session) {
-	store.sessionsID.setOlmSessionID(roomID, userID, device.Curve25519, session.ID())
-	store.db.StoreOlmSessionID(roomID, userID, device.Curve25519, session.ID())
+	container.sessionsID.setOlmSessionID(roomID, userID, device.Curve25519, session.ID())
+	container.db.StoreOlmSessionID(roomID, userID, device.Curve25519, session.ID())
 	device.OlmSessions[session.ID()] = session
-	store.db.StoreOlmSession(userID, device.ID, session)
+	container.db.StoreOlmSession(userID, device.ID, session)
 }
 
 func (rs *RoomsSessionsID) setMegolmSessionID(roomID mat.RoomID, userID mat.UserID,
@@ -757,12 +824,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	store, err = LoadStore(_userID, _deviceID, db)
+	container, err = LoadContainer(_userID, _deviceID, db)
 	if err != nil {
-		store.Close()
+		container.Close()
 		log.Fatal(err)
 	}
-	defer store.Close()
+	defer container.Close()
 
 	cli, _ = mat.NewClient(_homeserver, "", "")
 	cli.Prefix = "/_matrix/client/unstable"
@@ -790,19 +857,19 @@ func main() {
 	//}
 	//return
 
-	//resp, err := cli.KeysQuery(map[string][]string{string(store.me.ID): []string{}}, -1)
+	//resp, err := cli.KeysQuery(map[string][]string{string(container.me.ID): []string{}}, -1)
 	//if err != nil {
 	//	panic(err)
 	//}
 	//fmt.Printf("\n\n%+v\n\n", resp)
 	//return
 
-	//err = cli.UpdateDevice(string(store.me.Device.ID), "go-olm-test")
+	//err = cli.UpdateDevice(string(container.me.Device.ID), "go-olm-test")
 	//if err != nil {
 	//	panic(err)
 	//}
 
-	err = store.me.KeysUpload()
+	err = container.me.KeysUpload()
 	if err != nil {
 		panic(err)
 	}
@@ -815,12 +882,12 @@ func main() {
 	for i := 0; i < 2; i++ {
 		//	for i := 0; i < len(joinedRooms.JoinedRooms); i++ {
 		roomID := mat.RoomID(joinedRooms.JoinedRooms[i])
-		if store.rooms[roomID] == nil {
+		if container.rooms[roomID] == nil {
 			room := NewRoom(roomID)
 			room.encryptionAlg = olm.AlgorithmNone
-			store.rooms[roomID] = room
+			container.rooms[roomID] = room
 		}
-		room := store.rooms[roomID]
+		room := container.rooms[roomID]
 		joinedMembers, err := cli.JoinedMembers(string(roomID))
 		if err != nil {
 			panic(err)
@@ -830,7 +897,7 @@ func main() {
 			if userDetails.DisplayName != nil {
 				name = *userDetails.DisplayName
 			}
-			room.Users[mat.UserID(userID)] = &User{
+			room.users[mat.UserID(userID)] = &User{
 				id:   mat.UserID(userID),
 				name: name,
 			}
@@ -840,12 +907,12 @@ func main() {
 		}
 		fmt.Printf("%02d %s\n", i, roomID)
 		count := 0
-		for userID, user := range room.Users {
-			if userID == store.me.ID {
+		for userID, user := range room.users {
+			if userID == container.me.ID {
 				continue
 			}
 			count++
-			if count == 6 && len(room.Users) > 6 {
+			if count == 6 && len(room.users) > 6 {
 				fmt.Printf("\t...\n")
 				continue
 			} else if count > 6 {
@@ -890,12 +957,12 @@ func main() {
 			panic(err)
 		}
 		roomID = mat.RoomID(resp.RoomID)
-		store.rooms[roomID] = NewRoom(mat.RoomID(roomID))
+		container.rooms[roomID] = NewRoom(mat.RoomID(roomID))
 	} else {
 		roomID = mat.RoomID(joinedRooms.JoinedRooms[roomIdx])
 		fmt.Println("Selected room is", roomID)
-		for userID, _ := range store.rooms[mat.RoomID(roomID)].Users {
-			if userID == store.me.ID {
+		for userID, _ := range container.rooms[mat.RoomID(roomID)].users {
+			if userID == container.me.ID {
 				continue
 			}
 			theirUser.id = userID
@@ -903,10 +970,10 @@ func main() {
 		}
 	}
 
-	room := store.rooms[roomID]
+	room := container.rooms[roomID]
 
 	// TMP
-	room.Users[theirUser.id] = &User{
+	room.users[theirUser.id] = &User{
 		id: theirUser.id,
 	}
 
@@ -918,7 +985,7 @@ func main() {
 	//deviceKeysAlgorithms := map[string]map[string]string{string(theirUserDevices.ID): map[string]string{}}
 	//keysToClaim := 0
 	//for theirDeviceID, _ := range theirUserDevices.Devices {
-	//	if store.sessionsID.GetOlmSessionID(room.id, theirUserDevices.ID, theirDeviceID) == "" {
+	//	if container.sessionsID.GetOlmSessionID(room.id, theirUserDevices.ID, theirDeviceID) == "" {
 	//		deviceKeysAlgorithms[string(theirUserDevices.ID)][string(theirDeviceID)] = "signed_curve25519"
 	//		keysToClaim++
 	//	}
@@ -951,15 +1018,15 @@ func main() {
 	//				device, ok := theirUserDevices.Devices[DeviceID(theirDeviceID)]
 	//				if ok {
 	//					oneTimeKey = OTK.Key
-	//					olmSession, err := store.me.Device.OlmAccount.NewOutboundSession(device.Curve25519,
+	//					olmSession, err := container.me.Device.OlmAccount.NewOutboundSession(device.Curve25519,
 	//						oneTimeKey)
 	//					if err != nil {
 	//						panic(err)
 	//					}
-	//					store.sessionsID.setOlmSessionID(room.id, theirUserDevices.ID, device.ID, SessionID(olmSession.ID()))
-	//					store.db.StoreOlmSessionID(room.id, theirUserDevices.ID, device.ID, SessionID(olmSession.ID()))
+	//					container.sessionsID.setOlmSessionID(room.id, theirUserDevices.ID, device.ID, SessionID(olmSession.ID()))
+	//					container.db.StoreOlmSessionID(room.id, theirUserDevices.ID, device.ID, SessionID(olmSession.ID()))
 	//					device.OlmSessions[SessionID(olmSession.ID())] = olmSession
-	//					store.db.StoreOlmSession(theirUserDevices.ID, device.ID, olmSession)
+	//					container.db.StoreOlmSession(theirUserDevices.ID, device.ID, olmSession)
 	//				}
 	//			}
 	//		}
@@ -1065,7 +1132,7 @@ type MegolmMsg struct {
 }
 
 func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
-	if olmMsg.SenderKey == store.me.Device.Curve25519 {
+	if olmMsg.SenderKey == container.me.Device.Curve25519 {
 		// TODO: Cache self encrypted olm messages so that they can be queried here
 		return "", fmt.Errorf("Olm encrypted messages by myself not cached yet")
 	}
@@ -1074,17 +1141,17 @@ func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string
 	if err != nil {
 		return "", err
 	}
-	ciphertext, ok := olmMsg.Ciphertext[store.me.Device.Curve25519]
+	ciphertext, ok := olmMsg.Ciphertext[container.me.Device.Curve25519]
 	if !ok {
 		return "", fmt.Errorf("Message not encrypted for our Curve25519 key %s",
-			store.me.Device.Curve25519)
+			container.me.Device.Curve25519)
 	}
 	var session *olm.Session
-	sessionsID := store.sessionsID.getSessionsID(roomID, sender, olmMsg.SenderKey)
+	sessionsID := container.sessionsID.getSessionsID(roomID, sender, olmMsg.SenderKey)
 	if sessionsID == nil {
 		// Is this a pre key message where the sender has started an olm session?
 		if ciphertext.Type == olm.MsgTypePreKey {
-			session, err = store.me.Device.OlmAccount.
+			session, err = container.me.Device.OlmAccount.
 				NewInboundSession(ciphertext.Body)
 			if err != nil {
 				return "", err
@@ -1102,7 +1169,7 @@ func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string
 	if err != nil {
 		// Is this a pre key message where the sender has started a new olm session?
 		if ciphertext.Type == olm.MsgTypePreKey {
-			session2, err2 := store.me.Device.OlmAccount.
+			session2, err2 := container.me.Device.OlmAccount.
 				NewInboundSession(ciphertext.Body)
 			if err2 != nil {
 				return "", err
@@ -1118,12 +1185,12 @@ func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string
 			return "", err
 		}
 	}
-	store.db.StoreOlmSession(sender, device.ID, session)
+	container.db.StoreOlmSession(sender, device.ID, session)
 	return msg, nil
 }
 
 func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
-	if megolmMsg.SenderKey == store.me.Device.Curve25519 {
+	if megolmMsg.SenderKey == container.me.Device.Curve25519 {
 		// TODO: Figure this out
 		return "", fmt.Errorf("Megolm encrypted message by myself")
 	}
@@ -1133,7 +1200,7 @@ func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID
 	}
 	ciphertext := megolmMsg.Ciphertext
 	var session *olm.InboundGroupSession
-	sessionsID := store.sessionsID.getSessionsID(roomID, sender, megolmMsg.SenderKey)
+	sessionsID := container.sessionsID.getSessionsID(roomID, sender, megolmMsg.SenderKey)
 	if sessionsID == nil {
 		// TODO: (UserID, SenderKey) hasn't sent their megolm session
 		// key, request it TODO: After sending the request we may not
@@ -1149,7 +1216,7 @@ func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID
 		// TODO: Depending on the error type, we may decide to request they key
 		return "", fmt.Errorf("Unable to decrypt the megolm encrypted message: %s", err)
 	}
-	store.db.StoreMegolmInSession(sender, device.ID, session)
+	container.db.StoreMegolmInSession(sender, device.ID, session)
 	return msg, nil
 }
 
@@ -1256,9 +1323,9 @@ func parseRoomKey(roomID mat.RoomID, userID mat.UserID,
 	senderKey := roomKey.OlmSenderKey
 	switch roomKey.Algorithm {
 	case olm.AlgorithmMegolmV1:
-		sessionsID := store.sessionsID.getSessionsID(roomKey.RoomID, userID, senderKey)
+		sessionsID := container.sessionsID.getSessionsID(roomKey.RoomID, userID, senderKey)
 		if sessionsID == nil {
-			sessionsID = store.sessionsID.makeSessionsID(roomKey.RoomID,
+			sessionsID = container.sessionsID.makeSessionsID(roomKey.RoomID,
 				userID, senderKey)
 		}
 		switch sessionsID.megolmInSessionID {
@@ -1284,11 +1351,11 @@ func parseRoomKey(roomID mat.RoomID, userID mat.UserID,
 		body = fmt.Sprintf("Received megolm session key for "+
 			"room %s, user %s, device %s, session %s",
 			roomID, userID, device.ID, roomKey.SessionID)
-		store.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
+		container.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
 			senderKey, roomKey.SessionID)
-		store.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519, session.ID())
+		container.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519, session.ID())
 		device.MegolmInSessions[session.ID()] = session
-		store.db.StoreMegolmInSession(userID, device.ID, session)
+		container.db.StoreMegolmInSession(userID, device.ID, session)
 	default:
 		body = fmt.Sprintf("Unhandled room_key.algorithm %s", roomKey.Algorithm)
 	}

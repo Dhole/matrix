@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-type Storer interface {
+type Databaser interface {
 	Close()
 	AddUser(userID mat.UserID) error
 	AddUserDevice(userID mat.UserID, deviceID mat.DeviceID) error
@@ -593,7 +593,7 @@ func (cdb *CryptoDB) LoadRooms() (map[mat.RoomID]*Room, error) {
 		err := cryptoRoomsBucket.ForEach(func(roomID, v []byte) error {
 			roomBucket := cryptoRoomsBucket.Bucket([]byte(roomID))
 			rooms[mat.RoomID(roomID)] = roomFromBucket(mat.RoomID(roomID), roomBucket)
-			rooms[mat.RoomID(roomID)].Users = make(map[mat.UserID]*User)
+			rooms[mat.RoomID(roomID)].users = make(map[mat.UserID]*User)
 			return nil
 		})
 		return err

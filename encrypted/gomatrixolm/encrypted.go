@@ -1,4 +1,4 @@
-package main
+package matrixolm
 
 import (
 	"encoding/json"
@@ -37,6 +37,18 @@ var container *Container
 
 var cli *mat.Client
 
+func mapUnmarshal(input interface{}, output interface{}) error {
+	config := &mapstructure.DecoderConfig{
+		TagName: "json",
+		Result:  output,
+	}
+	decoder, err := mapstructure.NewDecoder(config)
+	if err != nil {
+		panic(err)
+	}
+	return decoder.Decode(input)
+}
+
 // Container contains data structures that are completely or partly permanent
 // (backed by a data base).
 type Container struct {
@@ -47,8 +59,14 @@ type Container struct {
 	db         Databaser
 }
 
-func (c *Container) Room(roomID mat.RoomID) *Room {
-	return c.rooms[roomID]
+// Room gets or creates (if it doesn't exist) a Room and returns it
+func (c *Container) Room(roomID mat.RoomID) (room *Room) {
+	room = c.rooms[roomID]
+	if room == nil {
+		room = c.NewRoom(roomID)
+		c.rooms[roomID] = room
+	}
+	return
 }
 
 func (c *Container) ForEachUser(fn func(uID mat.UserID, ud *UserDevices) error) (err error) {
@@ -81,15 +99,13 @@ func LoadContainer(userID mat.UserID, deviceID mat.DeviceID, db Databaser) (*Con
 		olmAccount := olm.NewAccount()
 		container.db.StoreOlmAccount(userID, deviceID,
 			olmAccount)
-		// TODO: Upload device identity keys to server using `/keys/upload`
-		// TODO: Upload device one-time keys to server using `/keys/upload`
 	}
 	var err error
+	// Load stored self device (olm account, ...)
 	container.me, err = container.db.LoadMyUserDevice(userID)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("Identity keys:", container.me.Device.Ed25519, container.me.Device.Curve25519)
 
 	// Load stored user devices olm data (userID, deviceID, keys, olm sessions, ...)
 	container.users, err = container.db.LoadAllUserDevices()
@@ -172,7 +188,7 @@ func (d *Device) NewOlmSession(roomID mat.RoomID) (*olm.Session, error) {
 		switch algorithm {
 		case "signed_curve25519":
 			var OTK mat.OneTimeKey
-			err := mapstructure.Decode(rawOTK, &OTK)
+			err := mapUnmarshal(rawOTK, &OTK)
 			if err != nil {
 				return nil, err
 			}
@@ -440,7 +456,8 @@ func (me *MyUserDevice) KeysUpload() error {
 		return err
 	}
 	fmt.Printf("\n%+v\n\n", signedDeviceKeys)
-	err = mapstructure.Decode(signedDeviceKeys, &deviceKeys)
+	//err = mapstructure.Decode(signedDeviceKeys, &deviceKeys)
+	err = mapUnmarshal(signedDeviceKeys, &deviceKeys)
 	if err != nil {
 		return err
 	}
@@ -454,7 +471,7 @@ func (me *MyUserDevice) KeysUpload() error {
 		if err != nil {
 			return err
 		}
-		err = mapstructure.Decode(signedOtk, &otk)
+		err = mapUnmarshal(signedOtk, &otk)
 		if err != nil {
 			return err
 		}
@@ -477,18 +494,31 @@ type SessionsID struct {
 }
 
 type Room struct {
-	id            mat.RoomID
-	name          string
-	users         map[mat.UserID]*User
+	id   mat.RoomID
+	name string // TODO: Delete
+
+	joined  map[mat.UserID]*User
+	invited map[mat.UserID]*User
+	left    map[mat.UserID]*User
+	banned  map[mat.UserID]*User
+
 	encryptionAlg olm.Algorithm
 	//MegolmOutSession *olm.OutboundGroupSession
 }
 
-func NewRoom(roomID mat.RoomID) *Room {
+func newRoom(roomID mat.RoomID) *Room {
 	return &Room{
-		id:    roomID,
-		users: make(map[mat.UserID]*User),
+		id:      roomID,
+		joined:  make(map[mat.UserID]*User),
+		invited: make(map[mat.UserID]*User),
+		left:    make(map[mat.UserID]*User),
+		banned:  make(map[mat.UserID]*User),
 	}
+}
+
+func (c *Container) NewRoom(roomID mat.RoomID) *Room {
+	// TODO: Store in db
+	return newRoom(roomID)
 }
 
 func (r *Room) ID() mat.RoomID {
@@ -538,13 +568,82 @@ func (r *Room) SendMsg(eventType string, contentJSON interface{}) error {
 	return nil
 }
 
-func (r *Room) ForEachUser(fn func(uID mat.UserID, u *User) error) (err error) {
-	for userID, user := range r.users {
+func (r *Room) users(mem Membership) *map[mat.UserID]*User {
+	switch mem {
+	case MemInvite:
+		return &r.invited
+	case MemJoin:
+		return &r.joined
+	case MemLeave:
+		return &r.left
+	case MemBan:
+		return &r.banned
+	}
+	return nil
+}
+
+func (r *Room) ForEachUser(mem Membership, fn func(uID mat.UserID, u *User) error) (err error) {
+	for userID, user := range *r.users(mem) {
 		if err = fn(userID, user); err != nil {
 			break
 		}
 	}
 	return err
+}
+
+type Membership int
+
+const (
+	MemInvite     Membership = iota
+	MemJoin       Membership = iota
+	MemLeave      Membership = iota
+	MemBan        Membership = iota
+	MembershipLen Membership = iota
+)
+
+func (r *Room) popUser(userID mat.UserID) (user *User) {
+	for _, mem := range []Membership{MemInvite, MemJoin, MemLeave, MemBan} {
+		users := r.users(mem)
+		if user, ok := (*users)[userID]; ok {
+			delete(*users, userID)
+			return user
+		}
+	}
+	return nil
+	//if user, ok := r.invited[userID]; ok {
+	//	delete(r.invited, userID)
+	//	return user
+	//}
+	//if user, ok := r.joined[userID]; ok {
+	//	delete(r.joined, userID)
+	//	return user
+	//}
+	//if user, ok := r.left[userID]; ok {
+	//	delete(r.left, userID)
+	//	return user
+	//}
+	//if user, ok := r.banned[userID]; ok {
+	//	delete(r.banned, userID)
+	//	return user
+	//}
+	//return nil
+}
+
+func (r *Room) SetUserMembership(userID mat.UserID, mem Membership) {
+	user := r.popUser(userID)
+	if user == nil {
+		user = NewUser(userID)
+	}
+	switch mem {
+	case MemInvite:
+		r.invited[userID] = user
+	case MemJoin:
+		r.joined[userID] = user
+	case MemLeave:
+		r.left[userID] = user
+	case MemBan:
+		r.banned[userID] = user
+	}
 }
 
 type SendEncEventError struct {
@@ -600,7 +699,7 @@ func (r *Room) EncryptMegolmMsg(eventType string, contentJSON interface{}) strin
 func (r *Room) sendOlmMsg(eventType string, contentJSON interface{}) SendEncEventErrors {
 	var errs SendEncEventErrors
 	ciphertext := make(map[olm.Curve25519]Ciphertext)
-	r.ForEachUser(func(_ mat.UserID, user *User) error {
+	r.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
 		userDevices, err := user.Devices()
 		if err != nil {
 			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
@@ -640,7 +739,7 @@ func (r *Room) sendMegolmMsg(eventType string, contentJSON interface{}) SendEncE
 	// used to decrypt the message.
 	ciphertext := r.EncryptMegolmMsg(eventType, contentJSON)
 	session, _ := container.me.Device.MegolmOutSessions[r.id]
-	r.ForEachUser(func(_ mat.UserID, user *User) error {
+	r.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
 		userDevices, err := user.Devices()
 		if err != nil {
 			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
@@ -682,8 +781,16 @@ func (r *Room) sendPlaintextMsg(eventType string, contentJSON interface{}) error
 
 type User struct {
 	id      mat.UserID
-	name    string
+	name    string // TODO: Delete this
 	devices *UserDevices
+}
+
+func NewUser(userID mat.UserID) *User {
+	return &User{id: userID}
+}
+
+func (u *User) ID() mat.UserID {
+	return u.id
 }
 
 // Blocks when calling userDevices.Update()
@@ -816,7 +923,7 @@ func SplitAlgorithmKeyID(algorithmKeyID string) (string, string) {
 	return algorithmKeyIDSlice[0], algorithmKeyIDSlice[1]
 }
 
-func main() {
+func _main() {
 	_password = os.Args[1]
 
 	// Load/Create database
@@ -883,7 +990,7 @@ func main() {
 		//	for i := 0; i < len(joinedRooms.JoinedRooms); i++ {
 		roomID := mat.RoomID(joinedRooms.JoinedRooms[i])
 		if container.rooms[roomID] == nil {
-			room := NewRoom(roomID)
+			room := container.NewRoom(roomID)
 			room.encryptionAlg = olm.AlgorithmNone
 			container.rooms[roomID] = room
 		}
@@ -897,7 +1004,7 @@ func main() {
 			if userDetails.DisplayName != nil {
 				name = *userDetails.DisplayName
 			}
-			room.users[mat.UserID(userID)] = &User{
+			room.joined[mat.UserID(userID)] = &User{
 				id:   mat.UserID(userID),
 				name: name,
 			}
@@ -907,12 +1014,12 @@ func main() {
 		}
 		fmt.Printf("%02d %s\n", i, roomID)
 		count := 0
-		for userID, user := range room.users {
+		for userID, user := range room.joined {
 			if userID == container.me.ID {
 				continue
 			}
 			count++
-			if count == 6 && len(room.users) > 6 {
+			if count == 6 && len(room.joined) > 6 {
 				fmt.Printf("\t...\n")
 				continue
 			} else if count > 6 {
@@ -957,11 +1064,11 @@ func main() {
 			panic(err)
 		}
 		roomID = mat.RoomID(resp.RoomID)
-		container.rooms[roomID] = NewRoom(mat.RoomID(roomID))
+		container.rooms[roomID] = container.NewRoom(mat.RoomID(roomID))
 	} else {
 		roomID = mat.RoomID(joinedRooms.JoinedRooms[roomIdx])
 		fmt.Println("Selected room is", roomID)
-		for userID, _ := range container.rooms[mat.RoomID(roomID)].users {
+		for userID, _ := range container.rooms[mat.RoomID(roomID)].joined {
 			if userID == container.me.ID {
 				continue
 			}
@@ -973,7 +1080,7 @@ func main() {
 	room := container.rooms[roomID]
 
 	// TMP
-	room.users[theirUser.id] = &User{
+	room.joined[theirUser.id] = &User{
 		id: theirUser.id,
 	}
 
@@ -1066,37 +1173,37 @@ func main() {
 			time.Sleep(10)
 			continue
 		}
-		Filter(res, roomID)
+		//Filter(res, roomID)
 	}
 }
 
-func Filter(res *mat.RespSync, myRoomID mat.RoomID) {
-	for roomID, roomData := range res.Rooms.Join {
-		if roomID != string(myRoomID) {
-			continue
-		}
-		//fmt.Printf("\t%s\n", roomID)
-		for _, ev := range roomData.Timeline.Events {
-			ev.RoomID = roomID
-			sender, body := parseEvent(&ev)
-			fmt.Printf("> [%s] %s %s\n",
-				time.Unix(ev.Timestamp/1000, 0).Format("2006-01-02 15:04"),
-				sender, body)
-		}
-	}
-	for roomID, _ := range res.Rooms.Invite {
-		_, err := cli.JoinRoom(roomID, "", nil)
-		if err != nil {
-			fmt.Printf("Err Couldn't auto join room %s\n", roomID)
-		} else {
-			fmt.Printf("INFO Autojoined room %s\n", roomID)
-		}
-	}
-	for _, ev := range res.ToDevice.Events {
-		sender, body := parseSendToDeviceEvent(&ev)
-		fmt.Printf("$$$ %s %s\n", sender, body)
-	}
-}
+//func Filter(res *mat.RespSync, myRoomID mat.RoomID) {
+//	for roomID, roomData := range res.Rooms.Join {
+//		if roomID != string(myRoomID) {
+//			continue
+//		}
+//		//fmt.Printf("\t%s\n", roomID)
+//		for _, ev := range roomData.Timeline.Events {
+//			ev.RoomID = roomID
+//			sender, body := parseEvent(&ev)
+//			fmt.Printf("> [%s] %s %s\n",
+//				time.Unix(ev.Timestamp/1000, 0).Format("2006-01-02 15:04"),
+//				sender, body)
+//		}
+//	}
+//	for roomID, _ := range res.Rooms.Invite {
+//		_, err := cli.JoinRoom(roomID, "", nil)
+//		if err != nil {
+//			fmt.Printf("Err Couldn't auto join room %s\n", roomID)
+//		} else {
+//			fmt.Printf("INFO Autojoined room %s\n", roomID)
+//		}
+//	}
+//	for _, ev := range res.ToDevice.Events {
+//		sender, body := parseSendToDeviceEvent(&ev)
+//		fmt.Printf("$$$ %s %s\n", sender, body)
+//	}
+//}
 
 // TODO: Delete this
 type Ciphertext struct {
@@ -1105,30 +1212,30 @@ type Ciphertext struct {
 }
 
 type OlmMsg struct {
-	Algorithm  olm.Algorithm  `json:"algorithm" mapstructure:"algorithm"`
-	SenderKey  olm.Curve25519 `json:"sender_key" mapstructure:"sender_key"`
+	Algorithm  olm.Algorithm  `json:"algorithm"`
+	SenderKey  olm.Curve25519 `json:"sender_key"`
 	Ciphertext map[olm.Curve25519]struct {
-		Type olm.MsgType `json:"type" mapstructure:"type"`
-		Body string      `json:"body" mapstructure:"body"`
-	} `json:"ciphertext" mapstructure:"ciphertext"`
+		Type olm.MsgType `json:"type"`
+		Body string      `json:"body"`
+	} `json:"ciphertext"`
 }
 
 type RoomKey struct {
 	// OlmSenderKey is filled when this event is obtained through the
 	// decryption of an m.room.encrypted event.
 	OlmSenderKey olm.Curve25519
-	Algorithm    olm.Algorithm `json:"algorithm" mapstructure:"algorithm"`
-	RoomID       mat.RoomID    `json:"room_id" mapstructure:"room_id"`
-	SessionID    olm.SessionID `json:"session_id" mapstructure:"session_id"`
-	SessionKey   string        `json:"session_key" mapstructure:"session_key"`
+	Algorithm    olm.Algorithm `json:"algorithm"`
+	RoomID       mat.RoomID    `json:"room_id"`
+	SessionID    olm.SessionID `json:"session_id"`
+	SessionKey   string        `json:"session_key"`
 }
 
 type MegolmMsg struct {
-	Algorithm  olm.Algorithm  `json:"algorithm" mapstructure:"algorithm"`
-	Ciphertext string         `json:"ciphertext" mapstructure:"ciphertext"`
-	DeviceID   mat.DeviceID   `json:"device_id" mapstructure:"device_id"`
-	SenderKey  olm.Curve25519 `json:"sender_key" mapstructure:"sender_key"`
-	SessionID  olm.SessionID  `json:"session_id" mapstructure:"session_id"`
+	Algorithm  olm.Algorithm  `json:"algorithm"`
+	Ciphertext string         `json:"ciphertext"`
+	DeviceID   mat.DeviceID   `json:"device_id"`
+	SenderKey  olm.Curve25519 `json:"sender_key"`
+	SessionID  olm.SessionID  `json:"session_id"`
 }
 
 func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
@@ -1220,7 +1327,7 @@ func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID
 	return msg, nil
 }
 
-func parseEvent(ev *mat.Event) (sender string, body string) {
+func parseEvent(ev *Event) (sender string, body string) {
 	sender = fmt.Sprintf("%s:", ev.Sender)
 	userID := mat.UserID(ev.Sender)
 	roomID := mat.RoomID(ev.RoomID)
@@ -1251,8 +1358,8 @@ func parseEvent(ev *mat.Event) (sender string, body string) {
 	return
 }
 
-func parseSendToDeviceEvent(_ev *mat.SendToDeviceEvent) (sender string, body string) {
-	ev := &mat.Event{Sender: _ev.Sender, Type: _ev.Type, Content: _ev.Content}
+func parseSendToDeviceEvent(_ev *SendToDeviceEvent) (sender string, body string) {
+	ev := &Event{Event: mat.Event{Sender: _ev.Sender, Type: _ev.Type, Content: _ev.Content}}
 	if ev.Type == "m.room.encrypted" {
 		if senderKey, ok := ev.Content["sender_key"]; ok {
 			if senderKey, ok := senderKey.(string); ok {
@@ -1269,13 +1376,13 @@ func parseRoomEncrypted(roomID mat.RoomID, userID mat.UserID,
 	sender = fmt.Sprintf("%s:", userID)
 
 	var decEventJSON string
-	var decEvent mat.Event
+	var decEvent Event
 	var senderKey olm.Curve25519
 	var err error
 	switch content["algorithm"] {
 	case string(olm.AlgorithmOlmV1):
 		var olmMsg OlmMsg
-		err = mapstructure.Decode(content, &olmMsg)
+		err = mapUnmarshal(content, &olmMsg)
 		if err != nil {
 			break
 		}
@@ -1283,7 +1390,7 @@ func parseRoomEncrypted(roomID mat.RoomID, userID mat.UserID,
 		decEventJSON, err = decryptOlmMsg(&olmMsg, userID, roomID)
 	case string(olm.AlgorithmMegolmV1):
 		var megolmMsg MegolmMsg
-		err = mapstructure.Decode(content, &megolmMsg)
+		err = mapUnmarshal(content, &megolmMsg)
 		if err != nil {
 			break
 		}
@@ -1315,7 +1422,7 @@ func parseRoomEncrypted(roomID mat.RoomID, userID mat.UserID,
 func parseRoomKey(roomID mat.RoomID, userID mat.UserID,
 	content map[string]interface{}) (sender string, body string) {
 	var roomKey RoomKey
-	err := mapstructure.Decode(content, &roomKey)
+	err := mapUnmarshal(content, &roomKey)
 	if err != nil {
 		body = fmt.Sprintf("ERROR - Parsing m.room_key event: %s", err)
 		return

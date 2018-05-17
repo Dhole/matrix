@@ -1,4 +1,4 @@
-package main
+package matrixolm
 
 import (
 	"encoding/binary"
@@ -581,7 +581,7 @@ func (cdb *CryptoDB) LoadMapSessionsID() (*RoomsSessionsID, error) {
 }
 
 func roomFromBucket(roomID mat.RoomID, roomBucket *bolt.Bucket) *Room {
-	room := NewRoom(roomID)
+	room := newRoom(roomID)
 	room.encryptionAlg = olm.Algorithm(roomBucket.Get([]byte("encryption_alg")))
 	return room
 }
@@ -593,7 +593,6 @@ func (cdb *CryptoDB) LoadRooms() (map[mat.RoomID]*Room, error) {
 		err := cryptoRoomsBucket.ForEach(func(roomID, v []byte) error {
 			roomBucket := cryptoRoomsBucket.Bucket([]byte(roomID))
 			rooms[mat.RoomID(roomID)] = roomFromBucket(mat.RoomID(roomID), roomBucket)
-			rooms[mat.RoomID(roomID)].users = make(map[mat.UserID]*User)
 			return nil
 		})
 		return err

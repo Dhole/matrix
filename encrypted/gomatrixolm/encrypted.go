@@ -151,6 +151,10 @@ type Device struct {
 	sharedMegolmOutKey map[olm.SessionID]bool
 }
 
+func (d *Device) String() string {
+	return fmt.Sprintf("%s:%s", d.ID, d.Curve25519)
+}
+
 //func NewDevice(deviceID mat.DeviceID) *Device {
 //	return &Device{
 //		ID:               mat.DeviceID(deviceID),

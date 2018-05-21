@@ -65,20 +65,20 @@ func NewClient(homeserverURL, userID, deviceID, accessToken string, db Databaser
 
 type DecryptedEvent struct {
 	Error error
-	Event mat.Event
+	Event *Event
 }
 
 // Event represents a single Matrix event.
 type Event struct {
 	mat.Event
-	Decrypted *DecryptedEvent
+	Decrypted *DecryptedEvent `json:"-"`
 }
 
 // SendToDeviceEvent represents an event received through the send-to-device API:
 // https://matrix.org/speculator/spec/drafts%2Fe2e/client_server/unstable.html#extensions-to-sync
 type SendToDeviceEvent struct {
 	mat.SendToDeviceEvent
-	Decrypted *DecryptedEvent
+	Decrypted *DecryptedEvent `json:"-"`
 }
 
 // RespSync is the JSON response for http://matrix.org/docs/spec/client_server/r0.2.0.html#get-matrix-client-r0-sync
@@ -171,7 +171,11 @@ func (cli *Client) parseSync(res *RespSync) {
 	}
 }
 
-func (cli *Client) parseEvent(room *Room, ev *Event) error {
+func (cli *Client) parseEvent(room *Room, _ev *Event) error {
+	ev := _ev
+	if ev.Decrypted != nil && ev.Decrypted.Error == nil {
+		ev = ev.Decrypted.Event
+	}
 	switch ev.Type {
 	case "m.room.member":
 		return cli.parseRoomMember(room, ev)
@@ -179,11 +183,16 @@ func (cli *Client) parseEvent(room *Room, ev *Event) error {
 		return cli.parseRoomEncryption(room, ev)
 	case "m.room.encrypted":
 		decEv, err := cli.parseRoomEncrypted(room, ev)
+		ev.Decrypted = &DecryptedEvent{Event: decEv, Error: err}
 		if err != nil {
 			return err
 		}
-		return cli.parseEvent(room, decEv)
+		return cli.parseEvent(room, ev)
 	case "m.room_key":
+		if ev == _ev {
+			return fmt.Errorf("Unable to handle unencrypted m.room_key event")
+		}
+		return cli.parseRoomKey(room, _ev, ev)
 	case "m.room_key_request":
 		cli.log.Debugf("m.room_key_request event type not implemented yet")
 	case "m.forwarded_room_key":
@@ -197,7 +206,7 @@ func (cli *Client) parseRoomMember(room *Room, ev *Event) error {
 	var roomMember ContentRoomMember
 	err := mapUnmarshal(ev.Content, &roomMember)
 	if err != nil {
-		return err
+		return fmt.Errorf("Error parsing m.room.member event: %s", err)
 	}
 	if ev.StateKey == nil {
 		return fmt.Errorf("m.room.member event doesn't contain state_key: %+v", ev)
@@ -227,7 +236,7 @@ func (cli *Client) parseRoomEncryption(room *Room, ev *Event) error {
 	var roomMember ContentRoomMember
 	err := mapUnmarshal(ev.Content, &roomMember)
 	if err != nil {
-		return err
+		return fmt.Errorf("Error parsing m.room.encryption event: %s", err)
 	}
 	algorithm, ok := ev.Content["algorithm"].(string)
 	if !ok {
@@ -246,24 +255,25 @@ func (cli *Client) parseRoomEncryption(room *Room, ev *Event) error {
 func (cli *Client) parseRoomEncrypted(room *Room, ev *Event) (*Event, error) {
 	var err error
 	var decEvJSON string
-	ev.Decrypted = &DecryptedEvent{}
-	defer func() {
-		ev.Decrypted.Error = err
-	}()
 	switch ev.Content["algorithm"] {
 	case string(olm.AlgorithmOlmV1):
 		var olmMsg OlmMsg
 		err = mapUnmarshal(ev.Content, &olmMsg)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error parsing m.room.encryption %s event: %s",
+				ev.Content["algorithm"], err)
 		}
 		//senderKey = olmMsg.SenderKey
 		decEvJSON, err = cli.decryptOlmMsg(ev, &olmMsg)
+		if err != nil {
+			return nil, err
+		}
 	//case string(olm.AlgorithmMegolmV1):
 	//	var megolmMsg MegolmMsg
 	//	err = mapUnmarshal(content, &megolmMsg)
 	//	if err != nil {
-	//		return nil, err
+	//		return nil, fmt.Errorf("Error parsing m.room.encryption %s event: %s",
+	//			ev.Content["algorithm"], err)
 	//	}
 	//	//senderKey = megolmMsg.SenderKey
 	//	decEvJSON, err = decryptMegolmMsg(&megolmMsg, userID, roomID)
@@ -274,6 +284,63 @@ func (cli *Client) parseRoomEncrypted(room *Room, ev *Event) (*Event, error) {
 	var decEv Event
 	err = json.Unmarshal([]byte(decEvJSON), &decEv)
 	return &decEv, err
+}
+func (cli *Client) parseRoomKey(room *Room, encEv *Event, ev *Event) error {
+	var roomKey RoomKey
+	err := mapUnmarshal(ev.Content, &roomKey)
+	if err != nil {
+		return fmt.Errorf("Error parsing m.room_key event: %s", err)
+	}
+	_senderKey, ok := encEv.Content["sender_key"].(string)
+	if !ok {
+		return fmt.Errorf("No sender_key found in parent (encrypted) event")
+	}
+	senderKey := olm.Curve25519(_senderKey)
+	userID := mat.UserID(encEv.Sender)
+	roomID := mat.RoomID(encEv.RoomID)
+	switch roomKey.Algorithm {
+	case olm.AlgorithmMegolmV1:
+		device, err := cli.UserDevice(userID, senderKey)
+		if err != nil {
+			return err
+		}
+		sessionsID := cli.Crypto.sessionsID.getSessionsID(roomKey.RoomID, userID, senderKey)
+		if sessionsID == nil {
+			sessionsID = cli.Crypto.sessionsID.makeSessionsID(roomKey.RoomID,
+				userID, senderKey)
+		}
+		switch sessionsID.megolmInSessionID {
+		case roomKey.SessionID:
+			// TODO: Check if the received session key is older
+			// than the one we have stored, and if so, replace it
+			return fmt.Errorf("Megolm session key for session id %s already exists in "+
+				"room %s for user %s", roomID, userID, roomKey.SessionID)
+		case "":
+			// No previous megolm session stored for (room, user, device)
+			fallthrough
+		default:
+			// Replacing Megolm session key for (room, user, device)
+			cli.log.Debugf("Replacing megolm session key for "+
+				"room %s, user %s, device %s (previous session: %s)",
+				roomID, userID, device, roomKey.SessionID)
+		}
+		session, err := olm.NewInboundGroupSession([]byte(roomKey.SessionKey))
+		if err != nil {
+			return err
+		}
+		cli.log.Debugf("Received megolm session key for "+
+			"room %s, user %s, device %s, session %s",
+			roomID, userID, device, roomKey.SessionID)
+		cli.Crypto.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
+			senderKey, roomKey.SessionID)
+		cli.Crypto.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519,
+			session.ID())
+		device.MegolmInSessions[session.ID()] = session
+		cli.Crypto.db.StoreMegolmInSession(userID, device.ID, session)
+	default:
+		return fmt.Errorf("Unhandled m.room_key algorithm %s", roomKey.Algorithm)
+	}
+	return nil
 }
 
 func (cli *Client) UserDevices(userID mat.UserID) (*UserDevices, error) {
@@ -302,18 +369,27 @@ func (cli *Client) userDevice(ud *UserDevices, deviceKey olm.Curve25519) (*Devic
 	return device, nil
 }
 
+func (cli *Client) UserDevice(userID mat.UserID, deviceKey olm.Curve25519) (*Device, error) {
+	ud, err := cli.UserDevices(userID)
+	if err != nil {
+		return nil, err
+	}
+	device, err := cli.userDevice(ud, deviceKey)
+	return device, err
+}
+
 // NOTE: Call this after the device keys have been verified to be signed by the
 // ed25519 key of the device!
 func (cli *Client) addUserDevice(ud *UserDevices, deviceID mat.DeviceID,
 	ed25519 olm.Ed25519, curve25519 olm.Curve25519) *Device {
 	// TODO!!!
-	// We pick the device by curve25519 because
+	// We pick the device by curve25519 instead of deviceID because curve25519 is unique.
 	device := ud.Devices[curve25519]
 	// We only add the device if we didn't have it before
 	if device == nil {
 		device = &Device{
 			user:             ud,
-			ID:               mat.DeviceID(deviceID),
+			ID:               deviceID,
 			Ed25519:          ed25519,
 			Curve25519:       curve25519,
 			OlmSessions:      make(map[olm.SessionID]*olm.Session),
@@ -375,11 +451,7 @@ func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 		return "", fmt.Errorf("Olm encrypted messages by myself not cached yet")
 	}
 	// NOTE: olm messages can be decrypted without the sender keys
-	userDevices, err := cli.UserDevices(sender)
-	if err != nil {
-		return "", err
-	}
-	device, err := cli.userDevice(userDevices, olmMsg.SenderKey)
+	device, err := cli.UserDevice(sender, olmMsg.SenderKey)
 	if err != nil {
 		return "", err
 	}

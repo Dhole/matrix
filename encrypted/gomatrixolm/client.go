@@ -263,23 +263,21 @@ func (cli *Client) parseRoomEncrypted(room *Room, ev *Event) (*Event, error) {
 			return nil, fmt.Errorf("Error parsing m.room.encryption %s event: %s",
 				ev.Content["algorithm"], err)
 		}
-		//senderKey = olmMsg.SenderKey
 		decEvJSON, err = cli.decryptOlmMsg(ev, &olmMsg)
+	case string(olm.AlgorithmMegolmV1):
+		var megolmMsg MegolmMsg
+		err = mapUnmarshal(ev.Content, &megolmMsg)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Error parsing m.room.encryption %s event: %s",
+				ev.Content["algorithm"], err)
 		}
-	//case string(olm.AlgorithmMegolmV1):
-	//	var megolmMsg MegolmMsg
-	//	err = mapUnmarshal(content, &megolmMsg)
-	//	if err != nil {
-	//		return nil, fmt.Errorf("Error parsing m.room.encryption %s event: %s",
-	//			ev.Content["algorithm"], err)
-	//	}
-	//	//senderKey = megolmMsg.SenderKey
-	//	decEvJSON, err = decryptMegolmMsg(&megolmMsg, userID, roomID)
+		decEvJSON, err = cli.decryptMegolmMsg(ev, &megolmMsg)
 	default:
 		return nil, fmt.Errorf("Encryption algorithm %+v not supported",
 			ev.Content["algorithm"])
+	}
+	if err != nil {
+		return nil, err
 	}
 	var decEv Event
 	err = json.Unmarshal([]byte(decEvJSON), &decEv)
@@ -478,6 +476,10 @@ func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 		}
 	} else {
 		session = device.OlmSessions[sessionsID.olmSessionID]
+		if session == nil {
+			return "", fmt.Errorf("Olm Session %s for user %s, device key %s not stored",
+				sessionsID.olmSessionID, sender, olmMsg.SenderKey)
+		}
 	}
 	msg, err := session.Decrypt(ciphertext.Body, ciphertext.Type)
 	if err != nil {
@@ -503,15 +505,119 @@ func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 	return msg, nil
 }
 
+func (cli *Client) decryptMegolmMsg(ev *Event, megolmMsg *MegolmMsg) (string, error) {
+	sender := mat.UserID(ev.Sender)
+	roomID := mat.RoomID(ev.RoomID)
+	if megolmMsg.SenderKey == cli.Crypto.me.Device.Curve25519 {
+		// TODO: Cache self encrypted olm messages so that they can be queried here
+		return "", fmt.Errorf("Megolm encrypted messages by myself not cached yet")
+	}
+
+	device, err := cli.UserDevice(sender, megolmMsg.SenderKey)
+	if err != nil {
+		return "", err
+	}
+	ciphertext := megolmMsg.Ciphertext
+	var session *olm.InboundGroupSession
+	sessionsID := cli.Crypto.sessionsID.getSessionsID(roomID, sender, megolmMsg.SenderKey)
+	if sessionsID == nil {
+		// TODO: (UserID, SenderKey) hasn't sent their megolm session
+		// key, request it.
+		// TODO: After sending the request we may not get the session
+		// key immediately, figure out a way to notify the client that
+		// the messages can now be decrypted upong receiving such key.
+		return "", fmt.Errorf("User %s with device key %s hasn't sent us the megolm "+
+			"session key", sender, megolmMsg.SenderKey)
+	}
+	if sessionsID.megolmInSessionID != megolmMsg.SessionID {
+		return "", fmt.Errorf("Stored megolm session ID (%s) doesn't match "+
+			"the message's session ID (%s) in room %s, user %s, device key %s",
+			sessionsID.megolmInSessionID, megolmMsg.SessionID, roomID, sender,
+			megolmMsg.SenderKey)
+	}
+	session = device.MegolmInSessions[megolmMsg.SessionID]
+	if session == nil {
+		return "", fmt.Errorf("Megolm Session %s for user %s, device key %s not stored",
+			sessionsID.olmSessionID, sender, megolmMsg.SenderKey)
+	}
+	msg, _, err := session.Decrypt(ciphertext)
+	if err != nil {
+		// TODO: Depending on the error type, we may decide to request they key
+		return "", fmt.Errorf("Unable to decrypt the megolm encrypted message: %s", err)
+	}
+	cli.Crypto.db.StoreMegolmInSession(sender, device.ID, session)
+	return msg, nil
+}
+
 // "m.room.member": invite, join, leave, ban, knock
 
 // SendMessageEvent sends a message event into a room. See http://matrix.org/docs/spec/client_server/r0.2.0.html#put-matrix-client-r0-rooms-roomid-send-eventtype-txnid
 // contentJSON should be a pointer to something that can be encoded as JSON using json.Marshal.
-func (cli *Client) SendMessageEvent(roomID string, eventType string, contentJSON interface{}) (resp *mat.RespSendEvent, err error) {
-	txnID := txnID()
-	urlPath := cli.Client.BuildURL("rooms", roomID, "send", eventType, txnID)
-	_, err = cli.Client.MakeRequest("PUT", urlPath, contentJSON, &resp)
-	return
+func (cli *Client) SendMessageEvent(roomID string, eventType string,
+	contentJSON interface{}) (*mat.RespSendEvent, error) {
+	// get room
+	room := cli.Crypto.Room(mat.RoomID(roomID))
+	switch room.encryptionAlg {
+	case olm.AlgorithmNone:
+		return cli.sendPlaintextMessageEvent(roomID, eventType, contentJSON)
+	case olm.AlgorithmOlmV1:
+		err := cli.sendOlmMsg(room, eventType, contentJSON)
+		return nil, err
+	case olm.AlgorithmMegolmV1:
+		err := cli.sendMegolmMsg(room, eventType, contentJSON)
+		return nil, err
+	}
+	panic(fmt.Sprintf("Invalid encryption algorithm %s", room.encryptionAlg))
+}
+
+// TODO: It seems I can batch all the encrypted messages into one, identified
+// by the Curve25519 key of the device of the user.
+func (cli *Client) sendOlmMsg(room *Room, eventType string, contentJSON interface{}) error {
+	var errs SendEncEventErrors
+	ciphertext := make(map[olm.Curve25519]Ciphertext)
+	room.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
+		userDevices, err := user.Devices()
+		if err != nil {
+			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
+			return nil
+		}
+		// TODO: Batch oneTimeKey claims of all devices for a user into
+		// one API call.  For now, device.EncryptOlmMsg will call
+		// device.newOlmSession for each device without session, which
+		// will trigger a oneTimeKey call for each device.
+		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
+			msgType, body, err := device.EncryptOlmMsg(room.id, eventType, contentJSON)
+			if err != nil {
+				errs = append(errs, SendEncEventError{UserID: user.id,
+					DeviceID: device.ID, Err: err})
+				return nil
+			}
+			ciphertext[device.Curve25519] = Ciphertext{Type: msgType, Body: body}
+			return nil
+		})
+		return nil
+	})
+	contentJSONEnc := map[string]interface{}{
+		"algorithm":  olm.AlgorithmOlmV1,
+		"ciphertext": ciphertext,
+		"sender_key": container.me.Device.Curve25519}
+	_, err := cli.SendMessageEvent(string(room.id), "m.room.encrypted", contentJSONEnc)
+	if err != nil {
+		errs = append(errs, SendEncEventError{Err: err})
+	}
+	return errs
+}
+
+// TODO
+func (cli *Client) sendMegolmMsg(room *Room, eventType string,
+	contentJSON interface{}) error {
+	return nil
+}
+
+func (cli *Client) sendPlaintextMessageEvent(roomID string, eventType string,
+	contentJSON interface{}) (*mat.RespSendEvent, error) {
+	resp, err := cli.Client.SendMessageEvent(roomID, eventType, contentJSON)
+	return resp, err
 }
 
 // SendText sends an m.room.message event into the given room with a msgtype of m.text

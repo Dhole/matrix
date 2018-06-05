@@ -1242,99 +1242,101 @@ type MegolmMsg struct {
 	SessionID  olm.SessionID  `json:"session_id"`
 }
 
-func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
-	if olmMsg.SenderKey == container.me.Device.Curve25519 {
-		// TODO: Cache self encrypted olm messages so that they can be queried here
-		return "", fmt.Errorf("Olm encrypted messages by myself not cached yet")
-	}
-	// NOTE: olm messages can be decrypted without the sender keys
-	device, err := GetUserDevice(sender, olmMsg.SenderKey)
-	if err != nil {
-		return "", err
-	}
-	ciphertext, ok := olmMsg.Ciphertext[container.me.Device.Curve25519]
-	if !ok {
-		return "", fmt.Errorf("Message not encrypted for our Curve25519 key %s",
-			container.me.Device.Curve25519)
-	}
-	var session *olm.Session
-	sessionsID := container.sessionsID.getSessionsID(roomID, sender, olmMsg.SenderKey)
-	if sessionsID == nil {
-		// Is this a pre key message where the sender has started an olm session?
-		if ciphertext.Type == olm.MsgTypePreKey {
-			session, err = container.me.Device.OlmAccount.
-				NewInboundSession(ciphertext.Body)
-			if err != nil {
-				return "", err
-			}
-			StoreNewOlmSession(roomID, sender, device, session)
+// DONE
+//func decryptOlmMsg(olmMsg *OlmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
+//	if olmMsg.SenderKey == container.me.Device.Curve25519 {
+//		// TODO: Cache self encrypted olm messages so that they can be queried here
+//		return "", fmt.Errorf("Olm encrypted messages by myself not cached yet")
+//	}
+//	// NOTE: olm messages can be decrypted without the sender keys
+//	device, err := GetUserDevice(sender, olmMsg.SenderKey)
+//	if err != nil {
+//		return "", err
+//	}
+//	ciphertext, ok := olmMsg.Ciphertext[container.me.Device.Curve25519]
+//	if !ok {
+//		return "", fmt.Errorf("Message not encrypted for our Curve25519 key %s",
+//			container.me.Device.Curve25519)
+//	}
+//	var session *olm.Session
+//	sessionsID := container.sessionsID.getSessionsID(roomID, sender, olmMsg.SenderKey)
+//	if sessionsID == nil {
+//		// Is this a pre key message where the sender has started an olm session?
+//		if ciphertext.Type == olm.MsgTypePreKey {
+//			session, err = container.me.Device.OlmAccount.
+//				NewInboundSession(ciphertext.Body)
+//			if err != nil {
+//				return "", err
+//			}
+//			StoreNewOlmSession(roomID, sender, device, session)
+//
+//		} else {
+//			return "", fmt.Errorf("No olm session stored for "+
+//				"room %s, user %s, device key %s", roomID, sender, olmMsg.SenderKey)
+//		}
+//	} else {
+//		session = device.OlmSessions[sessionsID.olmSessionID]
+//	}
+//	msg, err := session.Decrypt(ciphertext.Body, ciphertext.Type)
+//	if err != nil {
+//		// Is this a pre key message where the sender has started a new olm session?
+//		if ciphertext.Type == olm.MsgTypePreKey {
+//			session2, err2 := container.me.Device.OlmAccount.
+//				NewInboundSession(ciphertext.Body)
+//			if err2 != nil {
+//				return "", err
+//			}
+//			msg, err2 = session2.Decrypt(ciphertext.Body, ciphertext.Type)
+//			if err2 != nil {
+//				return "", err
+//			}
+//			session = session2
+//			StoreNewOlmSession(roomID, sender, device, session)
+//			return msg, nil
+//		} else {
+//			return "", err
+//		}
+//	}
+//	container.db.StoreOlmSession(sender, device.ID, session)
+//	return msg, nil
+//}
 
-		} else {
-			return "", fmt.Errorf("No olm session stored for "+
-				"room %s, user %s, device key %s", roomID, sender, olmMsg.SenderKey)
-		}
-	} else {
-		session = device.OlmSessions[sessionsID.olmSessionID]
-	}
-	msg, err := session.Decrypt(ciphertext.Body, ciphertext.Type)
-	if err != nil {
-		// Is this a pre key message where the sender has started a new olm session?
-		if ciphertext.Type == olm.MsgTypePreKey {
-			session2, err2 := container.me.Device.OlmAccount.
-				NewInboundSession(ciphertext.Body)
-			if err2 != nil {
-				return "", err
-			}
-			msg, err2 = session2.Decrypt(ciphertext.Body, ciphertext.Type)
-			if err2 != nil {
-				return "", err
-			}
-			session = session2
-			StoreNewOlmSession(roomID, sender, device, session)
-			return msg, nil
-		} else {
-			return "", err
-		}
-	}
-	container.db.StoreOlmSession(sender, device.ID, session)
-	return msg, nil
-}
-
-func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
-	if megolmMsg.SenderKey == container.me.Device.Curve25519 {
-		// TODO: Figure this out
-		return "", fmt.Errorf("Megolm encrypted message by myself")
-	}
-	device, err := GetUserDevice(sender, megolmMsg.SenderKey)
-	if err != nil {
-		return "", err
-	}
-	ciphertext := megolmMsg.Ciphertext
-	var session *olm.InboundGroupSession
-	sessionsID := container.sessionsID.getSessionsID(roomID, sender, megolmMsg.SenderKey)
-	if sessionsID == nil {
-		// TODO: (UserID, SenderKey) hasn't sent their megolm session
-		// key, request it TODO: After sending the request we may not
-		// get the session key immediately, figure out a way to notify
-		// the client that the messages can now be decrypted upong
-		// receiving such key
-		return "", fmt.Errorf("User %s with device key %s hasn't sent us the megolm "+
-			"session key", sender, megolmMsg.SenderKey)
-	}
-	session = device.MegolmInSessions[megolmMsg.SessionID]
-	msg, _, err := session.Decrypt(ciphertext)
-	if err != nil {
-		// TODO: Depending on the error type, we may decide to request they key
-		return "", fmt.Errorf("Unable to decrypt the megolm encrypted message: %s", err)
-	}
-	container.db.StoreMegolmInSession(sender, device.ID, session)
-	return msg, nil
-}
+// DONE
+//func decryptMegolmMsg(megolmMsg *MegolmMsg, sender mat.UserID, roomID mat.RoomID) (string, error) {
+//	if megolmMsg.SenderKey == container.me.Device.Curve25519 {
+//		// TODO: Figure this out
+//		return "", fmt.Errorf("Megolm encrypted message by myself")
+//	}
+//	device, err := GetUserDevice(sender, megolmMsg.SenderKey)
+//	if err != nil {
+//		return "", err
+//	}
+//	ciphertext := megolmMsg.Ciphertext
+//	var session *olm.InboundGroupSession
+//	sessionsID := container.sessionsID.getSessionsID(roomID, sender, megolmMsg.SenderKey)
+//	if sessionsID == nil {
+//		// TODO: (UserID, SenderKey) hasn't sent their megolm session
+//		// key, request it TODO: After sending the request we may not
+//		// get the session key immediately, figure out a way to notify
+//		// the client that the messages can now be decrypted upong
+//		// receiving such key
+//		return "", fmt.Errorf("User %s with device key %s hasn't sent us the megolm "+
+//			"session key", sender, megolmMsg.SenderKey)
+//	}
+//	session = device.MegolmInSessions[megolmMsg.SessionID]
+//	msg, _, err := session.Decrypt(ciphertext)
+//	if err != nil {
+//		// TODO: Depending on the error type, we may decide to request they key
+//		return "", fmt.Errorf("Unable to decrypt the megolm encrypted message: %s", err)
+//	}
+//	container.db.StoreMegolmInSession(sender, device.ID, session)
+//	return msg, nil
+//}
 
 func parseEvent(ev *Event) (sender string, body string) {
 	sender = fmt.Sprintf("%s:", ev.Sender)
-	userID := mat.UserID(ev.Sender)
-	roomID := mat.RoomID(ev.RoomID)
+	//	userID := mat.UserID(ev.Sender)
+	//	roomID := mat.RoomID(ev.RoomID)
 	switch ev.Type {
 	case "m.room.message":
 		switch ev.Content["msgtype"] {
@@ -1345,10 +1347,12 @@ func parseEvent(ev *Event) (sender string, body string) {
 			sender = fmt.Sprintf("%s ~", ev.Sender)
 		}
 		body, _ = ev.Content["body"].(string)
-	case "m.room.encrypted":
-		sender, body = parseRoomEncrypted(roomID, userID, ev.Content)
-	case "m.room_key":
-		sender, body = parseRoomKey(roomID, userID, ev.Content)
+	// DONE
+	//case "m.room.encrypted":
+	//	sender, body = parseRoomEncrypted(roomID, userID, ev.Content)
+	// DONE
+	//case "m.room_key":
+	//	sender, body = parseRoomKey(roomID, userID, ev.Content)
 	// TODO: Key sharing requests and forwards:
 	// https://docs.google.com/document/d/1m4gQkcnJkxNuBmb5NoFCIadIY-DyqqNAS3lloE73BlQ/edit#
 	case "m.room_key_request":
@@ -1375,106 +1379,111 @@ func parseSendToDeviceEvent(_ev *SendToDeviceEvent) (sender string, body string)
 	return
 }
 
-func parseRoomEncrypted(roomID mat.RoomID, userID mat.UserID,
-	content map[string]interface{}) (sender string, body string) {
-	sender = fmt.Sprintf("%s:", userID)
+// DONE
+//func parseRoomEncrypted(roomID mat.RoomID, userID mat.UserID,
+//	content map[string]interface{}) (sender string, body string) {
+//	sender = fmt.Sprintf("%s:", userID)
+//
+//	var decEventJSON string
+//	var decEvent Event
+//	var senderKey olm.Curve25519
+//	var err error
+//	switch content["algorithm"] {
+//	// DONE
+//	//case string(olm.AlgorithmOlmV1):
+//	//	var olmMsg OlmMsg
+//	//	err = mapUnmarshal(content, &olmMsg)
+//	//	if err != nil {
+//	//		break
+//	//	}
+//	//	senderKey = olmMsg.SenderKey
+//	//	decEventJSON, err = decryptOlmMsg(&olmMsg, userID, roomID)
+//	// DONE
+//	//case string(olm.AlgorithmOlmV1):
+//	//case string(olm.AlgorithmMegolmV1):
+//	//	var megolmMsg MegolmMsg
+//	//	err = mapUnmarshal(content, &megolmMsg)
+//	//	if err != nil {
+//	//		break
+//	//	}
+//	//	senderKey = megolmMsg.SenderKey
+//	//	decEventJSON, err = decryptMegolmMsg(&megolmMsg, userID, roomID)
+//	default:
+//		err = fmt.Errorf("Encryption algorithm %s not supported", content["algorithm"])
+//	}
+//	if err == nil {
+//		err = json.Unmarshal([]byte(decEventJSON), &decEvent)
+//	}
+//	if err != nil {
+//		body = fmt.Sprintf("ERROR - Unable to decrypt: %s", err)
+//	} else {
+//		switch decEvent.Type {
+//		case "m.room_key_request":
+//			fallthrough
+//		case "m.forwarded_room_key":
+//			fallthrough
+//		case "m.room_key":
+//			decEvent.Content["OlmSenderKey"] = senderKey
+//		}
+//		sender, body = parseEvent(&decEvent)
+//	}
+//	sender = fmt.Sprintf("[E] %s", sender)
+//	return
+//}
 
-	var decEventJSON string
-	var decEvent Event
-	var senderKey olm.Curve25519
-	var err error
-	switch content["algorithm"] {
-	case string(olm.AlgorithmOlmV1):
-		var olmMsg OlmMsg
-		err = mapUnmarshal(content, &olmMsg)
-		if err != nil {
-			break
-		}
-		senderKey = olmMsg.SenderKey
-		decEventJSON, err = decryptOlmMsg(&olmMsg, userID, roomID)
-	case string(olm.AlgorithmMegolmV1):
-		var megolmMsg MegolmMsg
-		err = mapUnmarshal(content, &megolmMsg)
-		if err != nil {
-			break
-		}
-		senderKey = megolmMsg.SenderKey
-		decEventJSON, err = decryptMegolmMsg(&megolmMsg, userID, roomID)
-	default:
-		err = fmt.Errorf("Encryption algorithm %s not supported", content["algorithm"])
-	}
-	if err == nil {
-		err = json.Unmarshal([]byte(decEventJSON), &decEvent)
-	}
-	if err != nil {
-		body = fmt.Sprintf("ERROR - Unable to decrypt: %s", err)
-	} else {
-		switch decEvent.Type {
-		case "m.room_key_request":
-			fallthrough
-		case "m.forwarded_room_key":
-			fallthrough
-		case "m.room_key":
-			decEvent.Content["OlmSenderKey"] = senderKey
-		}
-		sender, body = parseEvent(&decEvent)
-	}
-	sender = fmt.Sprintf("[E] %s", sender)
-	return
-}
-
-func parseRoomKey(roomID mat.RoomID, userID mat.UserID,
-	content map[string]interface{}) (sender string, body string) {
-	var roomKey RoomKey
-	err := mapUnmarshal(content, &roomKey)
-	if err != nil {
-		body = fmt.Sprintf("ERROR - Parsing m.room_key event: %s", err)
-		return
-	}
-	senderKey := roomKey.OlmSenderKey
-	switch roomKey.Algorithm {
-	case olm.AlgorithmMegolmV1:
-		sessionsID := container.sessionsID.getSessionsID(roomKey.RoomID, userID, senderKey)
-		if sessionsID == nil {
-			sessionsID = container.sessionsID.makeSessionsID(roomKey.RoomID,
-				userID, senderKey)
-		}
-		switch sessionsID.megolmInSessionID {
-		case roomKey.SessionID:
-			err = fmt.Errorf("Megolm session key for session id %s already exists",
-				roomKey.SessionID)
-		case "":
-			fallthrough
-		default:
-			// DEBUG: Replacing Megolm session key for (room, user, device)
-		}
-		if err != nil {
-			break
-		}
-		device, err := GetUserDevice(userID, senderKey)
-		if err != nil {
-			break
-		}
-		session, err := olm.NewInboundGroupSession([]byte(roomKey.SessionKey))
-		if err != nil {
-			break
-		}
-		body = fmt.Sprintf("Received megolm session key for "+
-			"room %s, user %s, device %s, session %s",
-			roomID, userID, device.ID, roomKey.SessionID)
-		container.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
-			senderKey, roomKey.SessionID)
-		container.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519, session.ID())
-		device.MegolmInSessions[session.ID()] = session
-		container.db.StoreMegolmInSession(userID, device.ID, session)
-	default:
-		body = fmt.Sprintf("Unhandled room_key.algorithm %s", roomKey.Algorithm)
-	}
-	if err != nil {
-		body = fmt.Sprintf("ERROR - Parsing m.room_key event: %s", err)
-	}
-	return
-}
+// DONE
+//func parseRoomKey(roomID mat.RoomID, userID mat.UserID,
+//	content map[string]interface{}) (sender string, body string) {
+//	var roomKey RoomKey
+//	err := mapUnmarshal(content, &roomKey)
+//	if err != nil {
+//		body = fmt.Sprintf("ERROR - Parsing m.room_key event: %s", err)
+//		return
+//	}
+//	senderKey := roomKey.OlmSenderKey
+//	switch roomKey.Algorithm {
+//	case olm.AlgorithmMegolmV1:
+//		sessionsID := container.sessionsID.getSessionsID(roomKey.RoomID, userID, senderKey)
+//		if sessionsID == nil {
+//			sessionsID = container.sessionsID.makeSessionsID(roomKey.RoomID,
+//				userID, senderKey)
+//		}
+//		switch sessionsID.megolmInSessionID {
+//		case roomKey.SessionID:
+//			err = fmt.Errorf("Megolm session key for session id %s already exists",
+//				roomKey.SessionID)
+//		case "":
+//			fallthrough
+//		default:
+//			// DEBUG: Replacing Megolm session key for (room, user, device)
+//		}
+//		if err != nil {
+//			break
+//		}
+//		device, err := GetUserDevice(userID, senderKey)
+//		if err != nil {
+//			break
+//		}
+//		session, err := olm.NewInboundGroupSession([]byte(roomKey.SessionKey))
+//		if err != nil {
+//			break
+//		}
+//		body = fmt.Sprintf("Received megolm session key for "+
+//			"room %s, user %s, device %s, session %s",
+//			roomID, userID, device.ID, roomKey.SessionID)
+//		container.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
+//			senderKey, roomKey.SessionID)
+//		container.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519, session.ID())
+//		device.MegolmInSessions[session.ID()] = session
+//		container.db.StoreMegolmInSession(userID, device.ID, session)
+//	default:
+//		body = fmt.Sprintf("Unhandled room_key.algorithm %s", roomKey.Algorithm)
+//	}
+//	if err != nil {
+//		body = fmt.Sprintf("ERROR - Parsing m.room_key event: %s", err)
+//	}
+//	return
+//}
 
 //
 //func Update(res *mat.RespSync) {

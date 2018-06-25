@@ -155,6 +155,10 @@ func (d *Device) String() string {
 	return fmt.Sprintf("%s:%s", d.ID, d.Curve25519)
 }
 
+func (d *Device) UserID() mat.UserID {
+	return d.user.ID()
+}
+
 //func NewDevice(deviceID mat.DeviceID) *Device {
 //	return &Device{
 //		ID:               mat.DeviceID(deviceID),
@@ -163,54 +167,54 @@ func (d *Device) String() string {
 //	}
 //}
 
-func (d *Device) NewOlmSession(roomID mat.RoomID) (*olm.Session, error) {
-	deviceKeysAlgorithms := map[string]map[string]string{
-		string(d.user.id): map[string]string{string(d.ID): "signed_curve25519"},
-	}
-	fmt.Printf("Query: %+v\n", deviceKeysAlgorithms)
-	respClaim, err := cli.KeysClaim(deviceKeysAlgorithms, -1)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Printf("Response: %+v\n", respClaim)
-
-	var oneTimeKey olm.Curve25519
-	// TODO: Check each map key individually to verify that the first one
-	// exists before getting the second one and avoid the possibility of
-	// getting a key from a nil map.
-	algorithmKey, ok := respClaim.OneTimeKeys[string(d.user.id)][string(d.ID)]
-	if !ok {
-		// TODO: This error is final, should we mark the device as
-		// unusable?  How do we know when new keys are uploaded?
-		// Should we keep trying to claim one time keys every time we
-		// send a message?
-		return nil, fmt.Errorf("One time key for device %s not returned", d.ID)
-	}
-	// SECURITY TODO: Verify signatures!
-	for algorithmKeyID, rawOTK := range algorithmKey {
-		algorithm, _ := SplitAlgorithmKeyID(algorithmKeyID)
-		switch algorithm {
-		case "signed_curve25519":
-			var OTK mat.OneTimeKey
-			err := mapUnmarshal(rawOTK, &OTK)
-			if err != nil {
-				return nil, err
-			}
-
-			oneTimeKey = OTK.Key
-			session, err := container.me.Device.OlmAccount.NewOutboundSession(
-				d.Curve25519, oneTimeKey)
-			if err != nil {
-				return nil, err
-			}
-			StoreNewOlmSession(roomID, d.user.id, d, session)
-
-			return session, nil
-		}
-	}
-
-	return nil, fmt.Errorf("/keys/claim API didn't return a signed_curve25519 object")
-}
+//func (d *Device) NewOlmSession(roomID mat.RoomID) (*olm.Session, error) {
+//	deviceKeysAlgorithms := map[string]map[string]string{
+//		string(d.user.id): map[string]string{string(d.ID): "signed_curve25519"},
+//	}
+//	fmt.Printf("Query: %+v\n", deviceKeysAlgorithms)
+//	respClaim, err := cli.KeysClaim(deviceKeysAlgorithms, -1)
+//	if err != nil {
+//		return nil, err
+//	}
+//	fmt.Printf("Response: %+v\n", respClaim)
+//
+//	var oneTimeKey olm.Curve25519
+//	// TODO: Check each map key individually to verify that the first one
+//	// exists before getting the second one and avoid the possibility of
+//	// getting a key from a nil map.
+//	algorithmKey, ok := respClaim.OneTimeKeys[string(d.user.id)][string(d.ID)]
+//	if !ok {
+//		// TODO: This error is final, should we mark the device as
+//		// unusable?  How do we know when new keys are uploaded?
+//		// Should we keep trying to claim one time keys every time we
+//		// send a message?
+//		return nil, fmt.Errorf("One time key for device %s not returned", d.ID)
+//	}
+//	// SECURITY TODO: Verify signatures!
+//	for algorithmKeyID, rawOTK := range algorithmKey {
+//		algorithm, _ := SplitAlgorithmKeyID(algorithmKeyID)
+//		switch algorithm {
+//		case "signed_curve25519":
+//			var OTK mat.OneTimeKey
+//			err := mapUnmarshal(rawOTK, &OTK)
+//			if err != nil {
+//				return nil, err
+//			}
+//
+//			oneTimeKey = OTK.Key
+//			session, err := container.me.Device.OlmAccount.NewOutboundSession(
+//				d.Curve25519, oneTimeKey)
+//			if err != nil {
+//				return nil, err
+//			}
+//			StoreNewOlmSession(roomID, d.user.id, d, session)
+//
+//			return session, nil
+//		}
+//	}
+//
+//	return nil, fmt.Errorf("/keys/claim API didn't return a signed_curve25519 object")
+//}
 
 // func (d *Device) EncryptOlmMsg(roomID RoomID, userID UserID, eventType string,
 // 	contentJSON interface{}) (interface{}, error) {
@@ -314,34 +318,34 @@ func SendToDeviceRoomID(key olm.Curve25519) mat.RoomID {
 //	return nil
 //}
 
-func (d *Device) SharedMegolmOutKey(sessionID olm.SessionID) bool {
-	return d.sharedMegolmOutKey[sessionID]
-}
+//func (d *Device) SharedMegolmOutKey(sessionID olm.SessionID) bool {
+//	return d.sharedMegolmOutKey[sessionID]
+//}
 
-func (d *Device) SetSharedMegolmOutKey(sessionID olm.SessionID) {
-	d.sharedMegolmOutKey[sessionID] = true
-	container.db.SetSharedMegolmOutKey(d.user.id, d.ID, sessionID)
-}
+//func (d *Device) SetSharedMegolmOutKey(sessionID olm.SessionID) {
+//	d.sharedMegolmOutKey[sessionID] = true
+//	container.db.SetSharedMegolmOutKey(d.user.id, d.ID, sessionID)
+//}
 
-func SharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
-	sessionID olm.SessionID) bool {
-	device, err := GetUserDevice(userID, deviceKey)
-	if err != nil {
-		return false
-	}
-	return device.sharedMegolmOutKey[sessionID]
-}
+//func SharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
+//	sessionID olm.SessionID) bool {
+//	device, err := GetUserDevice(userID, deviceKey)
+//	if err != nil {
+//		return false
+//	}
+//	return device.sharedMegolmOutKey[sessionID]
+//}
 
-func SetSharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
-	sessionID olm.SessionID) error {
-	device, err := GetUserDevice(userID, deviceKey)
-	if err != nil {
-		return err
-	}
-	device.sharedMegolmOutKey[sessionID] = true
-	container.db.SetSharedMegolmOutKey(userID, device.ID, sessionID)
-	return nil
-}
+//func SetSharedMegolmOutKey(userID mat.UserID, deviceKey olm.Curve25519,
+//	sessionID olm.SessionID) error {
+//	device, err := GetUserDevice(userID, deviceKey)
+//	if err != nil {
+//		return err
+//	}
+//	device.sharedMegolmOutKey[sessionID] = true
+//	container.db.SetSharedMegolmOutKey(userID, device.ID, sessionID)
+//	return nil
+//}
 
 type MyDevice struct {
 	ID         mat.DeviceID
@@ -382,61 +386,61 @@ func (ud *UserDevices) ForEach(fn func(k olm.Curve25519, d *Device) error) (err 
 	return err
 }
 
-func (ud *UserDevices) Update() error {
-	log.Println("Updating list of user", ud.id, "devices")
-	respQuery, err := cli.KeysQuery(map[string][]string{string(ud.id): []string{}}, -1)
-	if err != nil {
-		return err
-	}
-	//fmt.Printf("%+v\n", respQuery)
-	// TODO: Verify signatures, and save who has signed the key
-	for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[string(ud.id)] {
-		var ed25519 olm.Ed25519
-		var curve25519 olm.Curve25519
-		for algorithmKeyID, key := range deviceKeys.Keys {
-			algorithm, theirDeviceID2 := SplitAlgorithmKeyID(algorithmKeyID)
-			if theirDeviceID != theirDeviceID2 {
-				panic("TODO: Handle this case")
-			}
-			switch algorithm {
-			case "ed25519":
-				ed25519 = olm.Ed25519(key)
-			case "curve25519":
-				curve25519 = olm.Curve25519(key)
-			}
-		}
-		if ed25519 == "" || curve25519 == "" {
-			// TODO: Handle this case properly
-			continue
-		}
-		ud.NewUpdateDevice(mat.DeviceID(theirDeviceID), ed25519, curve25519)
-	}
-	return nil
-}
+//func (ud *UserDevices) Update() error {
+//	log.Println("Updating list of user", ud.id, "devices")
+//	respQuery, err := cli.KeysQuery(map[string][]string{string(ud.id): []string{}}, -1)
+//	if err != nil {
+//		return err
+//	}
+//	//fmt.Printf("%+v\n", respQuery)
+//	// TODO: Verify signatures, and save who has signed the key
+//	for theirDeviceID, deviceKeys := range respQuery.DeviceKeys[string(ud.id)] {
+//		var ed25519 olm.Ed25519
+//		var curve25519 olm.Curve25519
+//		for algorithmKeyID, key := range deviceKeys.Keys {
+//			algorithm, theirDeviceID2 := SplitAlgorithmKeyID(algorithmKeyID)
+//			if theirDeviceID != theirDeviceID2 {
+//				panic("TODO: Handle this case")
+//			}
+//			switch algorithm {
+//			case "ed25519":
+//				ed25519 = olm.Ed25519(key)
+//			case "curve25519":
+//				curve25519 = olm.Curve25519(key)
+//			}
+//		}
+//		if ed25519 == "" || curve25519 == "" {
+//			// TODO: Handle this case properly
+//			continue
+//		}
+//		ud.NewUpdateDevice(mat.DeviceID(theirDeviceID), ed25519, curve25519)
+//	}
+//	return nil
+//}
 
 // NOTE: Call this after the device keys have been verified to be signed by the
 // ed25519 key of the device!
-func (ud *UserDevices) NewUpdateDevice(deviceID mat.DeviceID,
-	ed25519 olm.Ed25519, curve25519 olm.Curve25519) *Device {
-	// TODO!!!
-	// We pick the device by curve25519 because
-	device := ud.Devices[curve25519]
-	if device == nil {
-		device = &Device{
-			user:             ud,
-			ID:               mat.DeviceID(deviceID),
-			Ed25519:          ed25519,
-			Curve25519:       curve25519,
-			OlmSessions:      make(map[olm.SessionID]*olm.Session),
-			MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
-		}
-		ud.Devices[device.Curve25519] = device
-		ud.DevicesByID[device.ID] = device
-		container.db.AddUserDevice(ud.id, device.ID)
-		container.db.StorePubKeys(ud.id, device.ID, device.Ed25519, device.Curve25519)
-	}
-	return device
-}
+//func (ud *UserDevices) NewUpdateDevice(deviceID mat.DeviceID,
+//	ed25519 olm.Ed25519, curve25519 olm.Curve25519) *Device {
+//	// TODO!!!
+//	// We pick the device by curve25519 because
+//	device := ud.Devices[curve25519]
+//	if device == nil {
+//		device = &Device{
+//			user:             ud,
+//			ID:               mat.DeviceID(deviceID),
+//			Ed25519:          ed25519,
+//			Curve25519:       curve25519,
+//			OlmSessions:      make(map[olm.SessionID]*olm.Session),
+//			MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
+//		}
+//		ud.Devices[device.Curve25519] = device
+//		ud.DevicesByID[device.ID] = device
+//		container.db.AddUserDevice(ud.id, device.ID)
+//		container.db.StorePubKeys(ud.id, device.ID, device.Ed25519, device.Curve25519)
+//	}
+//	return device
+//}
 
 type MyUserDevice struct {
 	ID     mat.UserID
@@ -445,54 +449,54 @@ type MyUserDevice struct {
 
 // TODO: Track how many unused keys are in the server, and find a mechanism to
 // update them if necessary
-func (me *MyUserDevice) KeysUpload() error {
-	olmAccount := me.Device.OlmAccount
-	deviceKeys := mat.DeviceKeys{
-		UserID:     me.ID,
-		DeviceID:   me.Device.ID,
-		Algorithms: []string{"m.olm.curve25519-aes-sha256"},
-		Keys: map[string]string{
-			fmt.Sprintf("curve25519:%s", me.Device.ID): string(me.Device.Curve25519),
-			fmt.Sprintf("ed25519:%s", me.Device.ID):    string(me.Device.Ed25519),
-		},
-	}
-	signedDeviceKeys, err := olmAccount.SignJSON(deviceKeys,
-		string(me.ID), string(me.Device.ID))
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\n%+v\n\n", signedDeviceKeys)
-	//err = mapstructure.Decode(signedDeviceKeys, &deviceKeys)
-	err = mapUnmarshal(signedDeviceKeys, &deviceKeys)
-	if err != nil {
-		return err
-	}
-	olmAccount.GenOneTimeKeys(4)
-	container.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
-	otks := olmAccount.OneTimeKeys()
-	oneTimeKeys := make(map[string]mat.OneTimeKey)
-	for keyID, key := range otks.Curve25519 {
-		otk := mat.OneTimeKey{Key: key}
-		signedOtk, err := olmAccount.SignJSON(otk, string(me.ID), string(me.Device.ID))
-		if err != nil {
-			return err
-		}
-		err = mapUnmarshal(signedOtk, &otk)
-		if err != nil {
-			return err
-		}
-		oneTimeKeys[fmt.Sprintf("signed_curve25519:%s", keyID)] = otk
-	}
-	fmt.Printf("\n%+v\n%+v\n", deviceKeys, oneTimeKeys)
-	res, err := cli.KeysUpload(&deviceKeys, oneTimeKeys)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\n%+v\n", res)
-	olmAccount.MarkKeysAsPublished()
-	container.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
-	return nil
-}
+//func (me *MyUserDevice) KeysUpload() error {
+//	olmAccount := me.Device.OlmAccount
+//	deviceKeys := mat.DeviceKeys{
+//		UserID:     me.ID,
+//		DeviceID:   me.Device.ID,
+//		Algorithms: []string{"m.olm.curve25519-aes-sha256"},
+//		Keys: map[string]string{
+//			fmt.Sprintf("curve25519:%s", me.Device.ID): string(me.Device.Curve25519),
+//			fmt.Sprintf("ed25519:%s", me.Device.ID):    string(me.Device.Ed25519),
+//		},
+//	}
+//	signedDeviceKeys, err := olmAccount.SignJSON(deviceKeys,
+//		string(me.ID), string(me.Device.ID))
+//	if err != nil {
+//		return err
+//	}
+//	fmt.Printf("\n%+v\n\n", signedDeviceKeys)
+//	//err = mapstructure.Decode(signedDeviceKeys, &deviceKeys)
+//	err = mapUnmarshal(signedDeviceKeys, &deviceKeys)
+//	if err != nil {
+//		return err
+//	}
+//	olmAccount.GenOneTimeKeys(4)
+//	container.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
+//	otks := olmAccount.OneTimeKeys()
+//	oneTimeKeys := make(map[string]mat.OneTimeKey)
+//	for keyID, key := range otks.Curve25519 {
+//		otk := mat.OneTimeKey{Key: key}
+//		signedOtk, err := olmAccount.SignJSON(otk, string(me.ID), string(me.Device.ID))
+//		if err != nil {
+//			return err
+//		}
+//		err = mapUnmarshal(signedOtk, &otk)
+//		if err != nil {
+//			return err
+//		}
+//		oneTimeKeys[fmt.Sprintf("signed_curve25519:%s", keyID)] = otk
+//	}
+//	fmt.Printf("\n%+v\n%+v\n", deviceKeys, oneTimeKeys)
+//	res, err := cli.KeysUpload(&deviceKeys, oneTimeKeys)
+//	if err != nil {
+//		return err
+//	}
+//	fmt.Printf("\n%+v\n", res)
+//	olmAccount.MarkKeysAsPublished()
+//	container.db.StoreOlmAccount(me.ID, me.Device.ID, olmAccount)
+//	return nil
+//}
 
 type SessionsID struct {
 	olmSessionID      olm.SessionID
@@ -531,32 +535,32 @@ func (r *Room) ID() mat.RoomID {
 	return r.id
 }
 
-func (r *Room) EncryptionAlg() olm.Algorithm {
-	return r.encryptionAlg
-}
+//func (r *Room) EncryptionAlg() olm.Algorithm {
+//	return r.encryptionAlg
+//}
+//
+//func (r *Room) SetOlmEncryption() error {
+//	return r.SetEncryption(olm.AlgorithmOlmV1)
+//}
+//
+//func (r *Room) SetMegolmEncryption() error {
+//	return r.SetEncryption(olm.AlgorithmMegolmV1)
+//}
 
-func (r *Room) SetOlmEncryption() error {
-	return r.SetEncryption(olm.AlgorithmOlmV1)
-}
-
-func (r *Room) SetMegolmEncryption() error {
-	return r.SetEncryption(olm.AlgorithmMegolmV1)
-}
-
-func (r *Room) SetEncryption(encryptionAlg olm.Algorithm) error {
-	if r.encryptionAlg == olm.AlgorithmNone {
-		_, err := cli.SendStateEvent(string(r.id), "m.room.encryption", "",
-			map[string]string{"algorithm": string(encryptionAlg)})
-		if err == nil {
-			r.encryptionAlg = encryptionAlg
-			container.db.StoreRoomEncryptionAlg(r.id, encryptionAlg)
-		}
-		return err
-	} else {
-		return fmt.Errorf("The room %v already has the encryption algorithm %v set",
-			r.id, r.encryptionAlg)
-	}
-}
+//func (r *Room) SetEncryption(encryptionAlg olm.Algorithm) error {
+//	if r.encryptionAlg == olm.AlgorithmNone {
+//		_, err := cli.SendStateEvent(string(r.id), "m.room.encryption", "",
+//			map[string]string{"algorithm": string(encryptionAlg)})
+//		if err == nil {
+//			r.encryptionAlg = encryptionAlg
+//			container.db.StoreRoomEncryptionAlg(r.id, encryptionAlg)
+//		}
+//		return err
+//	} else {
+//		return fmt.Errorf("The room %v already has the encryption algorithm %v set",
+//			r.id, r.encryptionAlg)
+//	}
+//}
 
 // DONE
 //func (r *Room) SendText(text string) error {
@@ -804,46 +808,46 @@ func (u *User) ID() mat.UserID {
 
 // Blocks when calling userDevices.Update()
 // TODO: Handle tracking and outdated devices
-func (u *User) Devices() (*UserDevices, error) {
-	if u.devices == nil {
-		devices, err := GetUserDevices(u.id)
-		if err != nil {
-			return nil, err
-		}
-		u.devices = devices
-	}
-	return u.devices, nil
-}
+//func (u *User) Devices() (*UserDevices, error) {
+//	if u.devices == nil {
+//		devices, err := GetUserDevices(u.id)
+//		if err != nil {
+//			return nil, err
+//		}
+//		u.devices = devices
+//	}
+//	return u.devices, nil
+//}
 
-func GetUserDevices(userID mat.UserID) (*UserDevices, error) {
-	userDevices, ok := container.users[userID]
-	if ok {
-		return userDevices, nil
-	} else {
-		var userDevices *UserDevices
-		userDevices = NewUserDevices(userID)
-		container.users[userDevices.id] = userDevices
-		container.db.AddUser(userDevices.id)
+//func GetUserDevices(userID mat.UserID) (*UserDevices, error) {
+//	userDevices, ok := container.users[userID]
+//	if ok {
+//		return userDevices, nil
+//	} else {
+//		var userDevices *UserDevices
+//		userDevices = NewUserDevices(userID)
+//		container.users[userDevices.id] = userDevices
+//		container.db.AddUser(userDevices.id)
+//
+//		if err := userDevices.Update(); err != nil {
+//			return nil, err
+//		}
+//		return userDevices, nil
+//	}
+//}
 
-		if err := userDevices.Update(); err != nil {
-			return nil, err
-		}
-		return userDevices, nil
-	}
-}
-
-func GetUserDevice(userID mat.UserID, deviceKey olm.Curve25519) (*Device, error) {
-	userDevices, err := GetUserDevices(userID)
-	if err != nil {
-		return nil, err
-	}
-	device := userDevices.Devices[deviceKey]
-	if device == nil {
-		return nil, fmt.Errorf("Device with key %s for user %s not available",
-			deviceKey, userID)
-	}
-	return device, nil
-}
+//func GetUserDevice(userID mat.UserID, deviceKey olm.Curve25519) (*Device, error) {
+//	userDevices, err := GetUserDevices(userID)
+//	if err != nil {
+//		return nil, err
+//	}
+//	device := userDevices.Devices[deviceKey]
+//	if device == nil {
+//		return nil, fmt.Errorf("Device with key %s for user %s not available",
+//			deviceKey, userID)
+//	}
+//	return device, nil
+//}
 
 // RoomsSessionsID maps (RoomID, UserID, Curve25519) to (olmSessionID, megolmInSessionID)
 type RoomsSessionsID struct {
@@ -906,12 +910,12 @@ func (rs *RoomsSessionsID) setOlmSessionID(roomID mat.RoomID, userID mat.UserID,
 	sessionsID.olmSessionID = sessionID
 }
 
-func StoreNewOlmSession(roomID mat.RoomID, userID mat.UserID, device *Device, session *olm.Session) {
-	container.sessionsID.setOlmSessionID(roomID, userID, device.Curve25519, session.ID())
-	container.db.StoreOlmSessionID(roomID, userID, device.Curve25519, session.ID())
-	device.OlmSessions[session.ID()] = session
-	container.db.StoreOlmSession(userID, device.ID, session)
-}
+//func StoreNewOlmSession(roomID mat.RoomID, userID mat.UserID, device *Device, session *olm.Session) {
+//	container.sessionsID.setOlmSessionID(roomID, userID, device.Curve25519, session.ID())
+//	container.db.StoreOlmSessionID(roomID, userID, device.Curve25519, session.ID())
+//	device.OlmSessions[session.ID()] = session
+//	container.db.StoreOlmSession(userID, device.ID, session)
+//}
 
 func (rs *RoomsSessionsID) setMegolmSessionID(roomID mat.RoomID, userID mat.UserID,
 	key olm.Curve25519, sessionID olm.SessionID) {
@@ -985,10 +989,10 @@ func _main() {
 	//	panic(err)
 	//}
 
-	err = container.me.KeysUpload()
-	if err != nil {
-		panic(err)
-	}
+	//err = container.me.KeysUpload()
+	//if err != nil {
+	//	panic(err)
+	//}
 	//return
 
 	joinedRooms, err := cli.JoinedRooms()
@@ -1160,12 +1164,12 @@ func _main() {
 	//	}
 	//}
 
-	if room.EncryptionAlg() == olm.AlgorithmNone {
-		err := room.SetMegolmEncryption()
-		if err != nil {
-			panic(err)
-		}
-	}
+	//if room.EncryptionAlg() == olm.AlgorithmNone {
+	//	err := room.SetMegolmEncryption()
+	//	if err != nil {
+	//		panic(err)
+	//	}
+	//}
 
 	//text := fmt.Sprint("I'm encrypted :D ~ ", time.Now().Format("2006-01-02 15:04:05"))
 	//err = room.SendText(text)

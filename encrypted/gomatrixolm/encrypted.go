@@ -1,7 +1,7 @@
 package matrixolm
 
 import (
-	"encoding/json"
+	//"encoding/json"
 	"fmt"
 	mat "github.com/Dhole/gomatrix"
 	"github.com/mitchellh/mapstructure"
@@ -250,67 +250,69 @@ func (d *Device) NewOlmSession(roomID mat.RoomID) (*olm.Session, error) {
 // 		"session_id": olmSession.ID()}, nil
 // }
 
-func (d *Device) EncryptOlmMsg(roomID mat.RoomID, eventType string,
-	contentJSON interface{}) (olm.MsgType, string, error) {
-	session, ok := d.OlmSessions[container.sessionsID.GetOlmSessionID(roomID,
-		d.user.id, d.Curve25519)]
-	if !ok {
-		var err error
-		session, err = d.NewOlmSession(roomID)
-		if err != nil {
-			return 0, "", err
-		}
-	}
-	payload := map[string]interface{}{
-		"type":           eventType,
-		"content":        contentJSON,
-		"recipient":      d.user.id,
-		"sender":         container.me.ID,
-		"recipient_keys": map[string]olm.Ed25519{"ed25519": d.Ed25519},
-		"room_id":        roomID}
-	if strings.HasPrefix(string(roomID), "_SendToDevice") {
-		delete(payload, "room_id")
-	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		panic(err)
-	}
-	//fmt.Println(string(payloadJSON))
-	encryptMsgType, encryptedMsg := session.Encrypt(string(payloadJSON))
-	container.db.StoreOlmSession(d.user.id, d.ID, session)
-
-	return encryptMsgType, encryptedMsg, nil
-}
+// DONE
+//func (d *Device) EncryptOlmMsg(roomID mat.RoomID, eventType string,
+//	contentJSON interface{}) (olm.MsgType, string, error) {
+//	session, ok := d.OlmSessions[container.sessionsID.GetOlmSessionID(roomID,
+//		d.user.id, d.Curve25519)]
+//	if !ok {
+//		var err error
+//		session, err = d.NewOlmSession(roomID)
+//		if err != nil {
+//			return 0, "", err
+//		}
+//	}
+//	payload := map[string]interface{}{
+//		"type":           eventType,
+//		"content":        contentJSON,
+//		"recipient":      d.user.id,
+//		"sender":         container.me.ID,
+//		"recipient_keys": map[string]olm.Ed25519{"ed25519": d.Ed25519},
+//		"room_id":        roomID}
+//	if strings.HasPrefix(string(roomID), "_SendToDevice") {
+//		delete(payload, "room_id")
+//	}
+//	payloadJSON, err := json.Marshal(payload)
+//	if err != nil {
+//		panic(err)
+//	}
+//	//fmt.Println(string(payloadJSON))
+//	encryptMsgType, encryptedMsg := session.Encrypt(string(payloadJSON))
+//	container.db.StoreOlmSession(d.user.id, d.ID, session)
+//
+//	return encryptMsgType, encryptedMsg, nil
+//}
 
 func SendToDeviceRoomID(key olm.Curve25519) mat.RoomID {
 	return mat.RoomID(fmt.Sprintf("_SendToDevice_%s", key))
 }
 
-func (d *Device) SendMegolmOutKey(roomID mat.RoomID,
-	session *olm.OutboundGroupSession) error {
-	_roomID := SendToDeviceRoomID(d.Curve25519)
-	msgType, msg, err := d.EncryptOlmMsg(_roomID, "m.room_key",
-		RoomKey{Algorithm: olm.AlgorithmMegolmV1, RoomID: roomID,
-			SessionID: session.ID(), SessionKey: session.SessionKey()})
-	if err != nil {
-		return err
-	}
-	ciphertext := make(map[olm.Curve25519]Ciphertext)
-	ciphertext[d.Curve25519] = Ciphertext{Type: msgType, Body: msg}
-	contentJSONEnc := map[string]interface{}{
-		"algorithm":  olm.AlgorithmOlmV1,
-		"ciphertext": ciphertext,
-		"sender_key": container.me.Device.Curve25519}
-	log.Println("Sending MegolmOut Key to", d.user.id, d.ID, "for room", roomID, "from", container.me.ID, container.me.Device.ID, "sender_key", container.me.Device.Curve25519, "session_id", session.ID())
-	log.Println("SessionKey: ", session.SessionKey())
-	err = cli.SendToDevice("m.room.encrypted", &mat.SendToDeviceMessages{
-		Messages: map[string]map[string]interface{}{
-			string(d.user.id): map[string]interface{}{string(d.ID): contentJSONEnc}}})
-	if err != nil {
-		return err
-	}
-	return nil
-}
+// DONE
+//func (d *Device) SendMegolmOutKey(roomID mat.RoomID,
+//	session *olm.OutboundGroupSession) error {
+//	_roomID := SendToDeviceRoomID(d.Curve25519)
+//	msgType, msg, err := d.EncryptOlmMsg(_roomID, "m.room_key",
+//		RoomKey{Algorithm: olm.AlgorithmMegolmV1, RoomID: roomID,
+//			SessionID: session.ID(), SessionKey: session.SessionKey()})
+//	if err != nil {
+//		return err
+//	}
+//	ciphertext := make(map[olm.Curve25519]Ciphertext)
+//	ciphertext[d.Curve25519] = Ciphertext{Type: msgType, Body: msg}
+//	contentJSONEnc := map[string]interface{}{
+//		"algorithm":  olm.AlgorithmOlmV1,
+//		"ciphertext": ciphertext,
+//		"sender_key": container.me.Device.Curve25519}
+//	log.Println("Sending MegolmOut Key to", d.user.id, d.ID, "for room", roomID, "from", container.me.ID, container.me.Device.ID, "sender_key", container.me.Device.Curve25519, "session_id", session.ID())
+//	log.Println("SessionKey: ", session.SessionKey())
+//	err = cli.SendToDevice("m.room.encrypted", &mat.SendToDeviceMessages{
+//		Messages: map[string]map[string]interface{}{
+//			string(d.user.id): map[string]interface{}{string(d.ID): contentJSONEnc}}})
+//	if err != nil {
+//		return err
+//	}
+//	return nil
+//}
 
 func (d *Device) SharedMegolmOutKey(sessionID olm.SessionID) bool {
 	return d.sharedMegolmOutKey[sessionID]
@@ -556,21 +558,23 @@ func (r *Room) SetEncryption(encryptionAlg olm.Algorithm) error {
 	}
 }
 
-func (r *Room) SendText(text string) error {
-	return r.SendMsg("m.room.message", mat.TextMessage{MsgType: "m.text", Body: text})
-}
+// DONE
+//func (r *Room) SendText(text string) error {
+//	return r.SendMsg("m.room.message", mat.TextMessage{MsgType: "m.text", Body: text})
+//}
 
-func (r *Room) SendMsg(eventType string, contentJSON interface{}) error {
-	switch r.encryptionAlg {
-	case olm.AlgorithmNone:
-		return r.sendPlaintextMsg(eventType, contentJSON)
-	case olm.AlgorithmOlmV1:
-		return r.sendOlmMsg(eventType, contentJSON)
-	case olm.AlgorithmMegolmV1:
-		return r.sendMegolmMsg(eventType, contentJSON)
-	}
-	return nil
-}
+// DONE
+//func (r *Room) SendMsg(eventType string, contentJSON interface{}) error {
+//	switch r.encryptionAlg {
+//	case olm.AlgorithmNone:
+//		return r.sendPlaintextMsg(eventType, contentJSON)
+//	case olm.AlgorithmOlmV1:
+//		return r.sendOlmMsg(eventType, contentJSON)
+//	case olm.AlgorithmMegolmV1:
+//		return r.sendMegolmMsg(eventType, contentJSON)
+//	}
+//	return nil
+//}
 
 func (r *Room) users(mem Membership) *map[mat.UserID]*User {
 	switch mem {
@@ -673,108 +677,109 @@ func (errs SendEncEventErrors) Error() string {
 	return string(b)
 }
 
-func (r *Room) EncryptMegolmMsg(eventType string, contentJSON interface{}) string {
-	session, ok := container.me.Device.MegolmOutSessions[r.id]
-	if !ok {
-		// TODO: Should we store the initial SessionKey, so that we can
-		// decrypt past messages?  What does Riot do?
-		session = olm.NewOutboundGroupSession()
-		container.me.Device.MegolmOutSessions[r.id] = session
-		container.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
-	}
-	payload := map[string]interface{}{
-		"type":    eventType,
-		"content": contentJSON,
-		"sender":  container.me.ID, // TODO: Needed?
-		"room_id": r.id}            // TODO: Needed?
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		panic(err)
-	}
-	//fmt.Println(string(payloadJSON))
-	encryptedMsg := session.Encrypt(string(payloadJSON))
-	container.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
+// DONE
+//func (r *Room) EncryptMegolmMsg(eventType string, contentJSON interface{}) string {
+//	session, ok := container.me.Device.MegolmOutSessions[r.id]
+//	if !ok {
+//		// TODO: Should we store the initial SessionKey, so that we can
+//		// decrypt past messages?  What does Riot do?
+//		session = olm.NewOutboundGroupSession()
+//		container.me.Device.MegolmOutSessions[r.id] = session
+//		container.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
+//	}
+//	payload := map[string]interface{}{
+//		"type":    eventType,
+//		"content": contentJSON,
+//		"sender":  container.me.ID, // TODO: Needed?
+//		"room_id": r.id}            // TODO: Needed?
+//	payloadJSON, err := json.Marshal(payload)
+//	if err != nil {
+//		panic(err)
+//	}
+//	//fmt.Println(string(payloadJSON))
+//	encryptedMsg := session.Encrypt(string(payloadJSON))
+//	container.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
+//
+//	return encryptedMsg
+//}
 
-	return encryptedMsg
-}
+// DONE
+//func (r *Room) sendOlmMsg(eventType string, contentJSON interface{}) SendEncEventErrors {
+//	var errs SendEncEventErrors
+//	ciphertext := make(map[olm.Curve25519]Ciphertext)
+//	r.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
+//		userDevices, err := user.Devices()
+//		if err != nil {
+//			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
+//			return nil
+//		}
+//		// TODO: Batch oneTimeKey claims of all devices for a user into
+//		// one API call.  For now, device.EncryptOlmMsg will call
+//		// device.newOlmSession for each device without session, which
+//		// will trigger a oneTimeKey call for each device.
+//		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
+//			msgType, body, err := device.EncryptOlmMsg(r.id, eventType, contentJSON)
+//			if err != nil {
+//				errs = append(errs, SendEncEventError{UserID: user.id,
+//					DeviceID: device.ID, Err: err})
+//				return nil
+//			}
+//			ciphertext[device.Curve25519] = Ciphertext{Type: msgType, Body: body}
+//			return nil
+//		})
+//		return nil
+//	})
+//	contentJSONEnc := map[string]interface{}{
+//		"algorithm":  olm.AlgorithmOlmV1,
+//		"ciphertext": ciphertext,
+//		"sender_key": container.me.Device.Curve25519}
+//	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
+//	if err != nil {
+//		errs = append(errs, SendEncEventError{Err: err})
+//	}
+//	return errs
+//}
 
-// TODO: It seems I can batch all the encrypted messages into one, identified
-// by the Curve25519 key of the device of the user.
-func (r *Room) sendOlmMsg(eventType string, contentJSON interface{}) SendEncEventErrors {
-	var errs SendEncEventErrors
-	ciphertext := make(map[olm.Curve25519]Ciphertext)
-	r.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
-		userDevices, err := user.Devices()
-		if err != nil {
-			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
-			return nil
-		}
-		// TODO: Batch oneTimeKey claims of all devices for a user into
-		// one API call.  For now, device.EncryptOlmMsg will call
-		// device.newOlmSession for each device without session, which
-		// will trigger a oneTimeKey call for each device.
-		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
-			msgType, body, err := device.EncryptOlmMsg(r.id, eventType, contentJSON)
-			if err != nil {
-				errs = append(errs, SendEncEventError{UserID: user.id,
-					DeviceID: device.ID, Err: err})
-				return nil
-			}
-			ciphertext[device.Curve25519] = Ciphertext{Type: msgType, Body: body}
-			return nil
-		})
-		return nil
-	})
-	contentJSONEnc := map[string]interface{}{
-		"algorithm":  olm.AlgorithmOlmV1,
-		"ciphertext": ciphertext,
-		"sender_key": container.me.Device.Curve25519}
-	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
-	if err != nil {
-		errs = append(errs, SendEncEventError{Err: err})
-	}
-	return errs
-}
-
-func (r *Room) sendMegolmMsg(eventType string, contentJSON interface{}) SendEncEventErrors {
-	var errs SendEncEventErrors
-	// TODO: Get Megolm SessionKey before encrypting the first message,
-	// otherwise the SessionKey ratchet will have advanced and can't be
-	// used to decrypt the message.
-	ciphertext := r.EncryptMegolmMsg(eventType, contentJSON)
-	session, _ := container.me.Device.MegolmOutSessions[r.id]
-	r.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
-		userDevices, err := user.Devices()
-		if err != nil {
-			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
-			return nil
-		}
-		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
-			if device.SharedMegolmOutKey(session.ID()) {
-				return nil
-			}
-			err := device.SendMegolmOutKey(r.id, session)
-			if err != nil {
-				device.SetSharedMegolmOutKey(session.ID())
-			}
-			return nil
-		})
-		return nil
-	})
-	contentJSONEnc := map[string]interface{}{
-		"algorithm":  olm.AlgorithmMegolmV1,
-		"ciphertext": ciphertext,
-		"sender_key": container.me.Device.Curve25519,
-		"session_id": session.ID(),
-		"device_id":  container.me.Device.ID}
-	//log.Println("Join the room now...")
-	//time.Sleep(10 * time.Second)
-	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
-	if err != nil {
-		errs = append(errs, SendEncEventError{Err: err})
-	}
-	return errs
-}
+// DONE
+//func (r *Room) sendMegolmMsg(eventType string, contentJSON interface{}) SendEncEventErrors {
+//	var errs SendEncEventErrors
+//	// TODO: Get Megolm SessionKey before encrypting the first message,
+//	// otherwise the SessionKey ratchet will have advanced and can't be
+//	// used to decrypt the message.
+//	ciphertext := r.EncryptMegolmMsg(eventType, contentJSON)
+//	session, _ := container.me.Device.MegolmOutSessions[r.id]
+//	r.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
+//		userDevices, err := user.Devices()
+//		if err != nil {
+//			errs = append(errs, SendEncEventError{UserID: user.id, Err: err})
+//			return nil
+//		}
+//		userDevices.ForEach(func(_ olm.Curve25519, device *Device) error {
+//			if device.SharedMegolmOutKey(session.ID()) {
+//				return nil
+//			}
+//			err := device.SendMegolmOutKey(r.id, session)
+//			if err != nil {
+//				device.SetSharedMegolmOutKey(session.ID())
+//			}
+//			return nil
+//		})
+//		return nil
+//	})
+//	contentJSONEnc := map[string]interface{}{
+//		"algorithm":  olm.AlgorithmMegolmV1,
+//		"ciphertext": ciphertext,
+//		"sender_key": container.me.Device.Curve25519,
+//		"session_id": session.ID(),
+//		"device_id":  container.me.Device.ID}
+//	//log.Println("Join the room now...")
+//	//time.Sleep(10 * time.Second)
+//	_, err := cli.SendMessageEvent(string(r.id), "m.room.encrypted", contentJSONEnc)
+//	if err != nil {
+//		errs = append(errs, SendEncEventError{Err: err})
+//	}
+//	return errs
+//}
 
 func (r *Room) sendPlaintextMsg(eventType string, contentJSON interface{}) error {
 	_, err := cli.SendMessageEvent(string(r.id), eventType, contentJSON)
@@ -1162,9 +1167,9 @@ func _main() {
 		}
 	}
 
-	text := fmt.Sprint("I'm encrypted :D ~ ", time.Now().Format("2006-01-02 15:04:05"))
-	err = room.SendText(text)
-	err = room.SendText(text)
+	//text := fmt.Sprint("I'm encrypted :D ~ ", time.Now().Format("2006-01-02 15:04:05"))
+	//err = room.SendText(text)
+	//err = room.SendText(text)
 	if err != nil {
 		// TODO: Do type assertion to extract each SendEncEventError?
 		log.Println(err)

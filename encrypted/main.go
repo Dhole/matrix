@@ -58,7 +58,7 @@ func main() {
 		//Filter(res, roomID)
 		break
 	}
-	fmt.Printf("%+v\n", res)
+	//fmt.Printf("%+v\n", res)
 
 	//cli.Crypto.ForEachRoom(func(_ mat.RoomID, room *mo.Room) error {
 	//	fmt.Printf("%s - %s\n", room.ID(), room.EncryptionAlg())

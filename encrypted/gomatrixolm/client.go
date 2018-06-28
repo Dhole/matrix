@@ -52,9 +52,9 @@ func NewClient(homeserverURL, userID, deviceID, accessToken string, db Databaser
 		},
 		log:    log,
 		Crypto: cryptoContainer}
-	device := cli.Crypto.me.Device
+	device := cli.Crypto.Me.Device
 	cli.log.Debugf("Loaded Device %s with identity keys Ed25519:%s Curve25519:%s",
-		device.ID, device.Ed25519, device.Curve25519)
+		device.ID, device.ed25519, device.curve25519)
 	// By default, use the default HTTP client.
 	cli.Client.Client = http.DefaultClient
 
@@ -332,10 +332,10 @@ func (cli *Client) parseRoomKey(room *Room, encEv *Event, ev *Event) error {
 			roomID, userID, device, roomKey.SessionID)
 		cli.Crypto.sessionsID.setMegolmSessionID(roomKey.RoomID, userID,
 			senderKey, roomKey.SessionID)
-		cli.Crypto.db.StoreMegolmInSessionID(roomID, userID, device.Curve25519,
+		cli.Crypto.db.StoreMegolmInSessionID(roomID, userID, device.curve25519,
 			session.ID())
 		device.MegolmInSessions[session.ID()] = session
-		cli.Crypto.db.StoreMegolmInSession(userID, device.ID, session)
+		cli.Crypto.db.StoreMegolmInSession(userID, device.ID(), session)
 	default:
 		return fmt.Errorf("Unhandled m.room_key algorithm %s", roomKey.Algorithm)
 	}
@@ -388,16 +388,16 @@ func (cli *Client) addUserDevice(ud *UserDevices, deviceID mat.DeviceID,
 	if device == nil {
 		device = &Device{
 			user:             ud,
-			ID:               deviceID,
-			Ed25519:          ed25519,
-			Curve25519:       curve25519,
+			id:               deviceID,
+			ed25519:          ed25519,
+			curve25519:       curve25519,
 			OlmSessions:      make(map[olm.SessionID]*olm.Session),
 			MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
 		}
-		ud.Devices[device.Curve25519] = device
-		ud.DevicesByID[device.ID] = device
-		cli.Crypto.db.AddUserDevice(ud.id, device.ID)
-		cli.Crypto.db.StorePubKeys(ud.id, device.ID, device.Ed25519, device.Curve25519)
+		ud.Devices[device.curve25519] = device
+		ud.DevicesByID[device.ID()] = device
+		cli.Crypto.db.AddUserDevice(ud.id, device.ID())
+		cli.Crypto.db.StorePubKeys(ud.id, device.ID(), device.ed25519, device.curve25519)
 	}
 	return device
 }
@@ -436,16 +436,16 @@ func (cli *Client) updateUserDevices(ud *UserDevices) error {
 
 func (cli *Client) storeNewOlmSession(device *Device, roomID mat.RoomID, session *olm.Session) {
 	userID := device.UserID()
-	cli.Crypto.sessionsID.setOlmSessionID(roomID, userID, device.Curve25519, session.ID())
-	cli.Crypto.db.StoreOlmSessionID(roomID, userID, device.Curve25519, session.ID())
+	cli.Crypto.sessionsID.setOlmSessionID(roomID, userID, device.curve25519, session.ID())
+	cli.Crypto.db.StoreOlmSessionID(roomID, userID, device.curve25519, session.ID())
 	device.OlmSessions[session.ID()] = session
-	cli.Crypto.db.StoreOlmSession(userID, device.ID, session)
+	cli.Crypto.db.StoreOlmSession(userID, device.ID(), session)
 }
 
 func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 	sender := mat.UserID(ev.Sender)
 	roomID := mat.RoomID(ev.RoomID)
-	if olmMsg.SenderKey == cli.Crypto.me.Device.Curve25519 {
+	if olmMsg.SenderKey == cli.Crypto.Me.Device.curve25519 {
 		// TODO: Cache self encrypted olm messages so that they can be queried here
 		return "", fmt.Errorf("Olm encrypted messages by myself not cached yet")
 	}
@@ -454,17 +454,17 @@ func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ciphertext, ok := olmMsg.Ciphertext[cli.Crypto.me.Device.Curve25519]
+	ciphertext, ok := olmMsg.Ciphertext[cli.Crypto.Me.Device.curve25519]
 	if !ok {
 		return "", fmt.Errorf("Message not encrypted for our Curve25519 key %s",
-			cli.Crypto.me.Device.Curve25519)
+			cli.Crypto.Me.Device.curve25519)
 	}
 	var session *olm.Session
 	sessionsID := cli.Crypto.sessionsID.getSessionsID(roomID, sender, olmMsg.SenderKey)
 	if sessionsID == nil {
 		// Is this a pre key message where the sender has started an olm session?
 		if ciphertext.Type == olm.MsgTypePreKey {
-			session, err = cli.Crypto.me.Device.OlmAccount.
+			session, err = cli.Crypto.Me.Device.OlmAccount.
 				NewInboundSession(ciphertext.Body)
 			if err != nil {
 				return "", err
@@ -486,7 +486,7 @@ func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 	if err != nil {
 		// Is this a pre key message where the sender has started a new olm session?
 		if ciphertext.Type == olm.MsgTypePreKey {
-			session2, err2 := cli.Crypto.me.Device.OlmAccount.
+			session2, err2 := cli.Crypto.Me.Device.OlmAccount.
 				NewInboundSession(ciphertext.Body)
 			if err2 != nil {
 				return "", err
@@ -502,14 +502,14 @@ func (cli *Client) decryptOlmMsg(ev *Event, olmMsg *OlmMsg) (string, error) {
 			return "", err
 		}
 	}
-	cli.Crypto.db.StoreOlmSession(sender, device.ID, session)
+	cli.Crypto.db.StoreOlmSession(sender, device.ID(), session)
 	return msg, nil
 }
 
 func (cli *Client) decryptMegolmMsg(ev *Event, megolmMsg *MegolmMsg) (string, error) {
 	sender := mat.UserID(ev.Sender)
 	roomID := mat.RoomID(ev.RoomID)
-	if megolmMsg.SenderKey == cli.Crypto.me.Device.Curve25519 {
+	if megolmMsg.SenderKey == cli.Crypto.Me.Device.curve25519 {
 		// TODO: Cache self encrypted olm messages so that they can be queried here
 		return "", fmt.Errorf("Megolm encrypted messages by myself not cached yet")
 	}
@@ -546,7 +546,7 @@ func (cli *Client) decryptMegolmMsg(ev *Event, megolmMsg *MegolmMsg) (string, er
 		// TODO: Depending on the error type, we may decide to request they key
 		return "", fmt.Errorf("Unable to decrypt the megolm encrypted message: %s", err)
 	}
-	cli.Crypto.db.StoreMegolmInSession(sender, device.ID, session)
+	cli.Crypto.db.StoreMegolmInSession(sender, device.ID(), session)
 	return msg, nil
 }
 
@@ -591,10 +591,10 @@ func (cli *Client) sendOlmMsg(room *Room, eventType string, contentJSON interfac
 			msgType, body, err := cli.encryptOlmMsg(device, room.id, eventType, contentJSON)
 			if err != nil {
 				errs = append(errs, SendEncEventError{UserID: user.id,
-					DeviceID: device.ID, Err: err})
+					DeviceID: device.ID(), Err: err})
 				return nil
 			}
-			ciphertext[device.Curve25519] = Ciphertext{Type: msgType, Body: body}
+			ciphertext[device.curve25519] = Ciphertext{Type: msgType, Body: body}
 			return nil
 		})
 		return nil
@@ -602,7 +602,7 @@ func (cli *Client) sendOlmMsg(room *Room, eventType string, contentJSON interfac
 	contentJSONEnc := map[string]interface{}{
 		"algorithm":  olm.AlgorithmOlmV1,
 		"ciphertext": ciphertext,
-		"sender_key": container.me.Device.Curve25519}
+		"sender_key": cli.Crypto.Me.Device.curve25519}
 	_, err := cli.sendPlaintextMessageEvent(string(room.id), "m.room.encrypted", contentJSONEnc)
 	if err != nil {
 		errs = append(errs, SendEncEventError{Err: err})
@@ -612,7 +612,7 @@ func (cli *Client) sendOlmMsg(room *Room, eventType string, contentJSON interfac
 
 func (cli *Client) newOlmSession(device *Device, roomID mat.RoomID) (*olm.Session, error) {
 	deviceKeysAlgorithms := map[string]map[string]string{
-		string(device.UserID()): map[string]string{string(device.ID): "signed_curve25519"},
+		string(device.UserID()): map[string]string{string(device.ID()): "signed_curve25519"},
 	}
 	fmt.Printf("Query: %+v\n", deviceKeysAlgorithms)
 	respClaim, err := cli.KeysClaim(deviceKeysAlgorithms, -1)
@@ -625,13 +625,13 @@ func (cli *Client) newOlmSession(device *Device, roomID mat.RoomID) (*olm.Sessio
 	// TODO: Check each map key individually to verify that the first one
 	// exists before getting the second one and avoid the possibility of
 	// getting a key from a nil map.
-	algorithmKey, ok := respClaim.OneTimeKeys[string(device.UserID())][string(device.ID)]
+	algorithmKey, ok := respClaim.OneTimeKeys[string(device.UserID())][string(device.ID())]
 	if !ok {
 		// TODO: This error is final, should we mark the device as
 		// unusable?  How do we know when new keys are uploaded?
 		// Should we keep trying to claim one time keys every time we
 		// send a message?
-		return nil, fmt.Errorf("One time key for device %s not returned", device.ID)
+		return nil, fmt.Errorf("One time key for device %s not returned", device.ID())
 	}
 	// SECURITY TODO: Verify signatures!
 	for algorithmKeyID, rawOTK := range algorithmKey {
@@ -645,8 +645,8 @@ func (cli *Client) newOlmSession(device *Device, roomID mat.RoomID) (*olm.Sessio
 			}
 
 			oneTimeKey = OTK.Key
-			session, err := cli.Crypto.me.Device.OlmAccount.NewOutboundSession(
-				device.Curve25519, oneTimeKey)
+			session, err := cli.Crypto.Me.Device.OlmAccount.NewOutboundSession(
+				device.curve25519, oneTimeKey)
 			if err != nil {
 				return nil, err
 			}
@@ -662,7 +662,7 @@ func (cli *Client) newOlmSession(device *Device, roomID mat.RoomID) (*olm.Sessio
 func (cli *Client) encryptOlmMsg(device *Device, roomID mat.RoomID, eventType string,
 	contentJSON interface{}) (olm.MsgType, string, error) {
 	session, ok := device.OlmSessions[cli.Crypto.sessionsID.GetOlmSessionID(roomID,
-		device.UserID(), device.Curve25519)]
+		device.UserID(), device.curve25519)]
 	if !ok {
 		var err error
 		session, err = cli.newOlmSession(device, roomID)
@@ -674,8 +674,8 @@ func (cli *Client) encryptOlmMsg(device *Device, roomID mat.RoomID, eventType st
 		"type":           eventType,
 		"content":        contentJSON,
 		"recipient":      device.UserID(),
-		"sender":         container.me.ID,
-		"recipient_keys": map[string]olm.Ed25519{"ed25519": device.Ed25519},
+		"sender":         cli.Crypto.Me.ID,
+		"recipient_keys": map[string]olm.Ed25519{"ed25519": device.ed25519},
 		"room_id":        roomID}
 	if strings.HasPrefix(string(roomID), "_SendToDevice") {
 		delete(payload, "room_id")
@@ -686,7 +686,7 @@ func (cli *Client) encryptOlmMsg(device *Device, roomID mat.RoomID, eventType st
 	}
 	//fmt.Println(string(payloadJSON))
 	encryptMsgType, encryptedMsg := session.Encrypt(string(payloadJSON))
-	cli.Crypto.db.StoreOlmSession(device.UserID(), device.ID, session)
+	cli.Crypto.db.StoreOlmSession(device.UserID(), device.ID(), session)
 
 	return encryptMsgType, encryptedMsg, nil
 }
@@ -752,16 +752,16 @@ func (cli *Client) updateDevice(userDevices *UserDevices, deviceID mat.DeviceID,
 	if device == nil {
 		device = &Device{
 			user:             userDevices,
-			ID:               mat.DeviceID(deviceID),
-			Ed25519:          ed25519,
-			Curve25519:       curve25519,
+			id:               mat.DeviceID(deviceID),
+			ed25519:          ed25519,
+			curve25519:       curve25519,
 			OlmSessions:      make(map[olm.SessionID]*olm.Session),
 			MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
 		}
-		userDevices.Devices[device.Curve25519] = device
-		userDevices.DevicesByID[device.ID] = device
-		cli.Crypto.db.AddUserDevice(userDevices.id, device.ID)
-		cli.Crypto.db.StorePubKeys(userDevices.id, device.ID, device.Ed25519, device.Curve25519)
+		userDevices.Devices[device.curve25519] = device
+		userDevices.DevicesByID[device.ID()] = device
+		cli.Crypto.db.AddUserDevice(userDevices.id, device.ID())
+		cli.Crypto.db.StorePubKeys(userDevices.id, device.ID(), device.ed25519, device.curve25519)
 	}
 	return device
 }
@@ -773,7 +773,7 @@ func (cli *Client) sendMegolmMsg(room *Room, eventType string,
 	// otherwise the SessionKey ratchet will have advanced and can't be
 	// used to decrypt the message.
 	ciphertext := cli.encryptMegolmMsg(room.ID(), eventType, contentJSON)
-	session, _ := cli.Crypto.me.Device.MegolmOutSessions[room.id]
+	session, _ := cli.Crypto.Me.Device.MegolmOutSessions[room.id]
 	room.ForEachUser(MemJoin, func(_ mat.UserID, user *User) error {
 		userDevices, err := cli.devices(user)
 		if err != nil {
@@ -795,9 +795,9 @@ func (cli *Client) sendMegolmMsg(room *Room, eventType string,
 	contentJSONEnc := map[string]interface{}{
 		"algorithm":  olm.AlgorithmMegolmV1,
 		"ciphertext": ciphertext,
-		"sender_key": container.me.Device.Curve25519,
+		"sender_key": cli.Crypto.Me.Device.curve25519,
 		"session_id": session.ID(),
-		"device_id":  container.me.Device.ID}
+		"device_id":  cli.Crypto.Me.Device.ID}
 	//log.Println("Join the room now...")
 	//time.Sleep(10 * time.Second)
 	_, err := cli.sendPlaintextMessageEvent(string(room.id), "m.room.encrypted", contentJSONEnc)
@@ -809,7 +809,7 @@ func (cli *Client) sendMegolmMsg(room *Room, eventType string,
 
 func (cli *Client) setSharedMegolmOutKey(device *Device, sessionID olm.SessionID) {
 	device.sharedMegolmOutKey[sessionID] = true
-	cli.Crypto.db.SetSharedMegolmOutKey(device.UserID(), device.ID, sessionID)
+	cli.Crypto.db.SetSharedMegolmOutKey(device.UserID(), device.ID(), sessionID)
 }
 
 func (cli *Client) sharedMegolmOutKey(device *Device, sessionID olm.SessionID) bool {
@@ -818,7 +818,7 @@ func (cli *Client) sharedMegolmOutKey(device *Device, sessionID olm.SessionID) b
 
 func (cli *Client) SendMegolmOutKey(device *Device, roomID mat.RoomID,
 	session *olm.OutboundGroupSession) error {
-	_roomID := SendToDeviceRoomID(device.Curve25519)
+	_roomID := SendToDeviceRoomID(device.curve25519)
 	msgType, msg, err := cli.encryptOlmMsg(device, _roomID, "m.room_key",
 		RoomKey{Algorithm: olm.AlgorithmMegolmV1, RoomID: roomID,
 			SessionID: session.ID(), SessionKey: session.SessionKey()})
@@ -826,18 +826,18 @@ func (cli *Client) SendMegolmOutKey(device *Device, roomID mat.RoomID,
 		return err
 	}
 	ciphertext := make(map[olm.Curve25519]Ciphertext)
-	ciphertext[device.Curve25519] = Ciphertext{Type: msgType, Body: msg}
+	ciphertext[device.curve25519] = Ciphertext{Type: msgType, Body: msg}
 	contentJSONEnc := map[string]interface{}{
 		"algorithm":  olm.AlgorithmOlmV1,
 		"ciphertext": ciphertext,
-		"sender_key": container.me.Device.Curve25519}
+		"sender_key": cli.Crypto.Me.Device.curve25519}
 	cli.log.Debugf("Sending MegolmOut Key to %s %s for room %s from %s %s sender_key %s session_id %s",
-		device.UserID(), device.ID, roomID, container.me.ID, container.me.Device.ID,
-		container.me.Device.Curve25519, session.ID())
+		device.UserID(), device.ID, roomID, cli.Crypto.Me.ID, cli.Crypto.Me.Device.ID,
+		cli.Crypto.Me.Device.curve25519, session.ID())
 	cli.log.Debugf("SessionKey: %s", session.SessionKey())
 	err = cli.SendToDevice("m.room.encrypted", &mat.SendToDeviceMessages{
 		Messages: map[string]map[string]interface{}{
-			string(device.UserID()): map[string]interface{}{string(device.ID): contentJSONEnc}}})
+			string(device.UserID()): map[string]interface{}{string(device.ID()): contentJSONEnc}}})
 	if err != nil {
 		return err
 	}
@@ -845,26 +845,26 @@ func (cli *Client) SendMegolmOutKey(device *Device, roomID mat.RoomID,
 }
 
 func (cli *Client) encryptMegolmMsg(roomID mat.RoomID, eventType string, contentJSON interface{}) string {
-	session, ok := cli.Crypto.me.Device.MegolmOutSessions[roomID]
+	session, ok := cli.Crypto.Me.Device.MegolmOutSessions[roomID]
 	if !ok {
 		// TODO: Should we store the initial SessionKey, so that we can
 		// decrypt past messages?  What does Riot do?
 		session = olm.NewOutboundGroupSession()
-		cli.Crypto.me.Device.MegolmOutSessions[roomID] = session
-		cli.Crypto.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
+		cli.Crypto.Me.Device.MegolmOutSessions[roomID] = session
+		cli.Crypto.db.StoreMegolmOutSession(cli.Crypto.Me.ID, cli.Crypto.Me.Device.ID, session)
 	}
 	payload := map[string]interface{}{
 		"type":    eventType,
 		"content": contentJSON,
-		"sender":  container.me.ID, // TODO: Needed?
-		"room_id": roomID}          // TODO: Needed?
+		"sender":  cli.Crypto.Me.ID, // TODO: Needed?
+		"room_id": roomID}           // TODO: Needed?
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		panic(err)
 	}
 	//fmt.Println(string(payloadJSON))
 	encryptedMsg := session.Encrypt(string(payloadJSON))
-	cli.Crypto.db.StoreMegolmOutSession(container.me.ID, container.me.Device.ID, session)
+	cli.Crypto.db.StoreMegolmOutSession(cli.Crypto.Me.ID, cli.Crypto.Me.Device.ID, session)
 
 	return encryptedMsg
 }
@@ -959,15 +959,15 @@ func (cli *Client) SetRoomEncryptionMegolm(roomID string) error {
 // TODO: Track how many unused keys are in the server, and find a mechanism to
 // update them if necessary
 func (cli *Client) DeviceKeysUpload() error {
-	me := cli.Crypto.me
+	me := cli.Crypto.Me
 	olmAccount := me.Device.OlmAccount
 	deviceKeys := mat.DeviceKeys{
 		UserID:     me.ID,
 		DeviceID:   me.Device.ID,
 		Algorithms: []string{"m.olm.curve25519-aes-sha256"},
 		Keys: map[string]string{
-			fmt.Sprintf("curve25519:%s", me.Device.ID): string(me.Device.Curve25519),
-			fmt.Sprintf("ed25519:%s", me.Device.ID):    string(me.Device.Ed25519),
+			fmt.Sprintf("curve25519:%s", me.Device.ID): string(me.Device.curve25519),
+			fmt.Sprintf("ed25519:%s", me.Device.ID):    string(me.Device.ed25519),
 		},
 	}
 	signedDeviceKeys, err := olmAccount.SignJSON(deviceKeys,

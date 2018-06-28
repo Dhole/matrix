@@ -2,6 +2,7 @@ package matrixolm
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	mat "github.com/Dhole/gomatrix"
 	"github.com/boltdb/bolt"
@@ -297,9 +298,9 @@ func (cdb *CryptoDB) StoreMegolmOutSession(userID mat.UserID, deviceID mat.Devic
 
 func deviceFromBucket(deviceID mat.DeviceID, deviceBucket *bolt.Bucket) (*Device, error) {
 	device := &Device{
-		ID:               deviceID,
-		Ed25519:          olm.Ed25519(deviceBucket.Get([]byte("ed25519"))),
-		Curve25519:       olm.Curve25519(deviceBucket.Get([]byte("curve25519"))),
+		id:               deviceID,
+		ed25519:          olm.Ed25519(deviceBucket.Get([]byte("ed25519"))),
+		curve25519:       olm.Curve25519(deviceBucket.Get([]byte("curve25519"))),
 		OlmSessions:      make(map[olm.SessionID]*olm.Session),
 		MegolmInSessions: make(map[olm.SessionID]*olm.InboundGroupSession),
 	}
@@ -359,8 +360,8 @@ func userDevicesFromBucket(userID mat.UserID, userBucket *bolt.Bucket) (*UserDev
 	err = devicesBucket.ForEach(func(deviceID, v []byte) error {
 		deviceBucket := devicesBucket.Bucket(deviceID)
 		device, err := deviceFromBucket(mat.DeviceID(deviceID), deviceBucket)
-		user.Devices[device.Curve25519] = device
-		user.DevicesByID[device.ID] = device
+		user.Devices[device.curve25519] = device
+		user.DevicesByID[device.ID()] = device
 		return err
 	})
 	return user, err
@@ -405,8 +406,8 @@ func (cdb *CryptoDB) LoadAllUserDevices() (map[mat.UserID]*UserDevices, error) {
 func myDeviceFromBucket(deviceID mat.DeviceID, deviceBucket *bolt.Bucket) (*MyDevice, error) {
 	device := &MyDevice{
 		ID:                mat.DeviceID(deviceID),
-		Ed25519:           olm.Ed25519(deviceBucket.Get([]byte("ed25519"))),
-		Curve25519:        olm.Curve25519(deviceBucket.Get([]byte("curve25519"))),
+		ed25519:           olm.Ed25519(deviceBucket.Get([]byte("ed25519"))),
+		curve25519:        olm.Curve25519(deviceBucket.Get([]byte("curve25519"))),
 		MegolmOutSessions: make(map[mat.RoomID]*olm.OutboundGroupSession),
 	}
 	var err error
@@ -494,48 +495,40 @@ func (cdb *CryptoDB) StoreOlmAccount(userID mat.UserID, deviceID mat.DeviceID, o
 //}
 
 // StoreOlmSessionID stores an olm SessionID at
-// /crypto_sessions_id/<roomID>/<userID>/<deviceID>/olm_session_id
+// /crypto_sessions_id/SessionTriplet{roomID,userID,deviceID}/olm_session_id
 func (cdb *CryptoDB) StoreOlmSessionID(roomID mat.RoomID, userID mat.UserID, key olm.Curve25519,
 	sessionID olm.SessionID) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
-		cryptoRoomsBucket := tx.Bucket([]byte("crypto_sessions_id"))
-		roomBucket, err := cryptoRoomsBucket.CreateBucketIfNotExists([]byte(roomID))
+		sessionsIDBucket := tx.Bucket([]byte("crypto_sessions_id"))
+		stJSON, err := json.Marshal(SessionTriplet{roomID, userID, key})
+		if err != nil {
+			return err
+		}
+		sessionIDBucket, err := sessionsIDBucket.CreateBucketIfNotExists(stJSON)
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)
 		}
-		userBucket, err := roomBucket.CreateBucketIfNotExists([]byte(userID))
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		deviceBucket, err := userBucket.CreateBucketIfNotExists([]byte(key))
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		deviceBucket.Put([]byte("olm_session_id"), []byte(sessionID))
+		sessionIDBucket.Put([]byte("olm_session_id"), []byte(sessionID))
 		return nil
 	})
 	return err
 }
 
 // StoreMegolmInSessionID stores an olm.Account at
-// /crypto_sessions_id/<roomID>/<userID>/<deviceID>/megolm_session_id
+// /crypto_sessions_id/SessionTriplet{roomID,userID,deviceID}/megolm_session_id
 func (cdb *CryptoDB) StoreMegolmInSessionID(roomID mat.RoomID, userID mat.UserID,
 	key olm.Curve25519, sessionID olm.SessionID) error {
 	err := cdb.db.Update(func(tx *bolt.Tx) error {
-		cryptoRoomsBucket := tx.Bucket([]byte("crypto_sessions_id"))
-		roomBucket, err := cryptoRoomsBucket.CreateBucketIfNotExists([]byte(roomID))
+		sessionsIDBucket := tx.Bucket([]byte("crypto_sessions_id"))
+		stJSON, err := json.Marshal(SessionTriplet{roomID, userID, key})
+		if err != nil {
+			return err
+		}
+		sessionIDBucket, err := sessionsIDBucket.CreateBucketIfNotExists(stJSON)
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)
 		}
-		userBucket, err := roomBucket.CreateBucketIfNotExists([]byte(userID))
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		deviceBucket, err := userBucket.CreateBucketIfNotExists([]byte(key))
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		deviceBucket.Put([]byte("megolm_session_id"), []byte(sessionID))
+		sessionIDBucket.Put([]byte("megolm_session_id"), []byte(sessionID))
 		return nil
 	})
 	return err
@@ -556,23 +549,32 @@ func updateMapSessionsIDFromBucket(roomID mat.RoomID, userID mat.UserID, key olm
 // LoadMapSessionsID loads all the RoomsSessionsID at /crypto_sessions_id/
 func (cdb *CryptoDB) LoadMapSessionsID() (*RoomsSessionsID, error) {
 	sessionsID := RoomsSessionsID{
-		roomIDuserIDKey: make(map[mat.RoomID]map[mat.UserID]map[olm.Curve25519]*SessionsID),
+		Sessions: make(map[SessionTriplet]*SessionsID),
 	}
 	err := cdb.db.View(func(tx *bolt.Tx) error {
-		cryptoRoomsBucket := tx.Bucket([]byte("crypto_sessions_id"))
-		err := cryptoRoomsBucket.ForEach(func(roomID, v []byte) error {
-			roomBucket := cryptoRoomsBucket.Bucket([]byte(roomID))
-			err := roomBucket.ForEach(func(userID, v []byte) error {
-				userBucket := roomBucket.Bucket(userID)
-				err := userBucket.ForEach(func(key, v []byte) error {
-					deviceBucket := userBucket.Bucket(key)
-					updateMapSessionsIDFromBucket(mat.RoomID(roomID),
-						mat.UserID(userID), olm.Curve25519(key),
-						deviceBucket, &sessionsID)
-					return nil
-				})
+		sessionsIDBucket := tx.Bucket([]byte("crypto_sessions_id"))
+		err := sessionsIDBucket.ForEach(func(stJSON, v []byte) error {
+			var st SessionTriplet
+			err := json.Unmarshal(stJSON, &st)
+			if err != nil {
 				return err
-			})
+			}
+			sessionIDBucket := sessionsIDBucket.Bucket(stJSON)
+			updateMapSessionsIDFromBucket(st.RoomID, st.UserID, st.Key, sessionIDBucket,
+				&sessionsID)
+			//roomBucket := cryptoRoomsBucket.Bucket([]byte(roomID))
+			//err := roomBucket.ForEach(func(userID, v []byte) error {
+			//	userBucket := roomBucket.Bucket(userID)
+			//	err := userBucket.ForEach(func(key, v []byte) error {
+			//		deviceBucket := userBucket.Bucket(key)
+			//		updateMapSessionsIDFromBucket(mat.RoomID(roomID),
+			//			mat.UserID(userID), olm.Curve25519(key),
+			//			deviceBucket, &sessionsID)
+			//		return nil
+			//	})
+			//	return err
+			//})
+
 			return err
 		})
 		return err
